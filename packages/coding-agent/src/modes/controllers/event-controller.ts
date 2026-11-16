@@ -682,9 +682,12 @@ export class EventController {
 		this.#approvalPreviewGates.clear();
 	}
 
-	#getReadGroup(): ReadToolGroupComponent {
+	#getReadGroup(toolName = "read"): ReadToolGroupComponent {
+		const kind = toolName === "swarm_read" ? "swarm_read" : "read";
+		if (this.#lastReadGroup && this.#lastReadGroup.toolName !== kind) this.#resetReadGroup();
 		if (!this.#lastReadGroup) {
 			const group = new ReadToolGroupComponent({
+				toolName: kind,
 				showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
@@ -1766,14 +1769,14 @@ export class EventController {
 				if (content.type !== "toolCall") continue;
 				const tool = this.ctx.viewSession.getToolByName(content.name);
 				const renderToolName = toolRenderName(content.name, tool);
-				if (renderToolName === "read") {
-					if (!readArgsHaveTarget(content.arguments)) {
+				if (renderToolName === "read" || renderToolName === "swarm_read") {
+					if (renderToolName === "read" && !readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
 						// read group (files + xd:// devices) vs ToolExecutionComponent (other internal URLs).
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
-					if (readArgsCollapseIntoGroup(content.arguments)) {
+					if (readArgsCollapseIntoGroup(content.arguments, renderToolName)) {
 						const existing = this.ctx.pendingTools.get(content.id);
 						if (existing) {
 							this.#trackReadToolCall(content.id, content.arguments);
@@ -1782,7 +1785,7 @@ export class EventController {
 							// A completed read remains in the timeline after leaving pendingTools.
 							this.#resolveDisplaceablePoll(renderToolName);
 							this.#trackReadToolCall(content.id, content.arguments);
-							const group = this.#getReadGroup();
+							const group = this.#getReadGroup(renderToolName);
 							group.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, group);
 							this.#toolTimelineComponents.set(content.id, group);
@@ -2133,9 +2136,9 @@ export class EventController {
 					this.ctx.chatContainer.removeChild(stale);
 				}
 			}
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+			if (readArgsCollapseIntoGroup(event.args, renderToolName)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
-				const group = this.#getReadGroup();
+				const group = this.#getReadGroup(renderToolName);
 				group.updateArgs(event.args, event.toolCallId);
 				this.ctx.pendingTools.set(event.toolCallId, group);
 				this.#toolTimelineComponents.set(event.toolCallId, group);
@@ -2185,7 +2188,7 @@ export class EventController {
 			// timeline-only hit cannot be a fresh execution — its queued
 			// update/end duplicate the settled result and are dropped as such.
 			this.#toolArgsReveal.finish(event.toolCallId);
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+			if (readArgsCollapseIntoGroup(event.args, renderToolName)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
 			}
 			const component =
@@ -2252,7 +2255,7 @@ export class EventController {
 	): void {
 		if (event.toolName === "read") this.#inlineReadToolImages(event.toolCallId, event.result);
 		this.#applyToolCompletion(component, event);
-		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
+		if (event.toolName === "read" || event.toolName === "swarm_read") this.#clearReadToolCall(event.toolCallId);
 		if (
 			component instanceof ToolExecutionComponent &&
 			component.isDisplaceableBlock() &&

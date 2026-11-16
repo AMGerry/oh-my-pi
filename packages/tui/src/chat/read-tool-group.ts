@@ -32,6 +32,9 @@ import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
+import type { ToolRenderResult } from "../tools/renderer";
+import { summarizeSwarmRead } from "../tools/swarm-card";
+import { swarmReadToolRenderer } from "../tools/swarm-read";
 import { card, code, col, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
@@ -71,7 +74,9 @@ export function readArgsHaveTarget(args: unknown): boolean {
  * content is visible, unless their spec declares `compactTranscript`
  * (device listings/docs read better in the compact grouped view).
  */
-export function readArgsCollapseIntoGroup(args: unknown): boolean {
+export function readArgsCollapseIntoGroup(args: unknown, toolName = "read"): boolean {
+	if (toolName === "swarm_read") return true;
+	if (toolName !== "read") return false;
 	const target = readArgsTarget(args);
 	if (target === undefined) return false;
 	const url = splitUrlScheme(target);
@@ -87,9 +92,12 @@ export function readArgsCollapseIntoGroup(args: unknown): boolean {
 export function groupedReadUsageCallIds(message: AssistantMessage): string[] | undefined {
 	const toolCallIds: string[] = [];
 	let sawToolCall = false;
+	let groupName: string | undefined;
 	for (const content of message.content) {
 		if (content.type === "toolCall") {
-			if (content.name !== "read" || !readArgsCollapseIntoGroup(content.arguments)) return undefined;
+			if (!readArgsCollapseIntoGroup(content.arguments, content.name)) return undefined;
+			if (groupName !== undefined && groupName !== content.name) return undefined;
+			groupName = content.name;
 			sawToolCall = true;
 			toolCallIds.push(content.id);
 			continue;
@@ -112,6 +120,7 @@ type ReadToolSuffixResolution = {
 };
 
 type ReadToolGroupOptions = {
+	toolName?: "read" | "swarm_read";
 	showContentPreview?: boolean;
 	/** Ask the extension transcript presenters; false for a replayed transcript (overlays). Default: true. */
 	transcriptPresenters?: boolean;
@@ -144,7 +153,7 @@ type ReadEntry = {
 	codeLineNumbers?: Array<number | null>;
 	/** The call as presenters see it. */
 	args?: unknown;
-	result?: { content: readonly unknown[]; details?: unknown };
+	result?: ToolRenderResult;
 	presentation: TranscriptPresentationState;
 	/**
 	 * The user opened this read (Ctrl+O, the `full` rows' toggle or its own compact row): it draws
@@ -397,6 +406,8 @@ function formatMergedSelectorParts(selectors: string[]): string {
 }
 
 export class ReadToolGroupComponent extends Container implements ToolExecutionHandle {
+	readonly toolName: "read" | "swarm_read";
+	readonly #label: string;
 	#entries = new Map<string, ReadEntry>();
 	#usageRows = new Map<string, ReadUsageRow>();
 	#usageBatchByToolCallId = new Map<string, string>();
@@ -427,6 +438,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
+		this.toolName = options.toolName ?? "read";
+		this.#label = this.toolName === "swarm_read" ? "Swarm read" : "Read";
 		this.#showContentPreview = options.showContentPreview ?? false;
 		this.#presented = options.transcriptPresenters ?? true;
 		this.#text = new Text("", 0, 0);
@@ -449,7 +462,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			const shown = drawn[index]!;
 			if (shown.mode === "compact") {
 				const glyph = entry.status === "success" ? undefined : formatStatusIcon(entry.status, theme);
-				lines.push(...compactRows(compactHead("Read", shortenPath(entry.path)), shown, width, glyph));
+				lines.push(...compactRows(compactHead(this.#label, shortenPath(entry.path)), shown, width, glyph));
 			} else if (shown.mode === "full" && !fullDrawn) {
 				fullDrawn = true;
 				lines.push(...super.render(width));
@@ -486,7 +499,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						: {
 								type: "toolCall",
 								id: entry.toolCallId,
-								toolName: "read",
+								toolName: this.toolName,
 								args: entry.args,
 								result: entry.result,
 								isError: entry.status === "error",
@@ -550,12 +563,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this.#blockVersion;
 	}
 
-	updateArgs(args: ReadRenderArgs, toolCallId?: string): void {
+	updateArgs(args: ReadRenderArgs | Record<string, unknown>, toolCallId?: string): void {
 		if (!toolCallId) return;
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
-		const displayPath = sanitizeText(rawPath);
-		const entry = this.#entries.get(toolCallId) ?? this.#newEntry(toolCallId, displayPath);
+		const existing = this.#entries.get(toolCallId);
+		const displayPath =
+			this.toolName === "swarm_read" ? summarizeSwarmRead(args, existing?.result).label : sanitizeText(rawPath);
+		const entry = existing ?? this.#newEntry(toolCallId, displayPath);
 		entry.path = displayPath;
 		entry.linkPath = path.isAbsolute(rawPath) ? rawPath : undefined;
 		entry.raw = args.raw === true;
@@ -603,6 +618,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
+		if (this.toolName === "swarm_read") {
+			const summary = summarizeSwarmRead(entry.args, result);
+			entry.path = summary.label;
+			entry.contentText = summary.content;
+			entry.status = result.isError || summary.error ? "error" : "success";
+			entry.result = result;
+			entry.presentation.markStale();
+			this.#updateDisplay();
+			entry.presentation.recheck();
+			return;
+		}
 		this.#spotlight.set(toolCallId, result.details, resultText(result));
 		// `details` can contain raw file text and filesystem paths. Keep the
 		// latter for links while only the sanitized copy supplies display labels.
@@ -775,8 +801,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				const shown = drawn.get(entry)!;
 				if (shown.mode === "compact") {
 					const own = presentNative(describeEntries([entry]), shown, {
-						role: "omp.tool.read",
-						title: "Read",
+						role: `omp.tool.${this.toolName}`,
+						title: this.#label,
 						target: shortenPath(entry.path) || "…",
 					});
 					children.push(keyed(own, `c${entry.toolCallId}`));
@@ -786,7 +812,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				}
 			}
 			// Always the column: each child keeps its key, so its toggle reaches only its own reads.
-			return withHidden(col(children, { role: "omp.tool.read" }), !this.#toolActivityVisible);
+			return withHidden(col(children, { role: `omp.tool.${this.toolName}` }), !this.#toolActivityVisible);
 		});
 	}
 
@@ -824,7 +850,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				body.push(this.#nativeUsage(usage, `u${i}`));
 			}
 		} else {
-			head = { target: formatCount("file", rows.length), targetKind: "text" };
+			head = {
+				target: formatCount(this.toolName === "swarm_read" ? "read" : "file", rows.length),
+				targetKind: "text",
+			};
 			const summaryRows = this.#buildSummaryRows(
 				this.#displayTargetsForEntries(entries.filter(entry => !previews.includes(entry))),
 			);
@@ -837,9 +866,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			}
 			for (const entry of previews) {
 				const split = splitPathAndSel(entry.path);
-				const name = shortenPath(split.path);
-				const sectionHead: TspSpan[] = [span(name || "…", "path")];
-				if (split.sel) sectionHead.push(span(`:${split.sel}`, "muted"));
+				const name = this.toolName === "swarm_read" ? entry.path : shortenPath(split.path);
+				const sectionHead: TspSpan[] = [span(name || "…", this.toolName === "swarm_read" ? "toolOutput" : "path")];
+				if (this.toolName === "read" && split.sel) sectionHead.push(span(`:${split.sel}`, "muted"));
 				body.push(node("section", { head: sectionHead }, this.#nativePreview(entry), `p${entry.toolCallId}`));
 				const usage = this.#usageRows.get(entry.toolCallId);
 				if (usage) body.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
@@ -849,9 +878,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			"tool",
 			{
 				...head,
-				role: "omp.tool.read",
-				name: "read",
-				title: "Read",
+				role: `omp.tool.${this.toolName}`,
+				name: this.toolName,
+				title: this.#label,
 				status,
 				tone: status === "error" ? "error" : undefined,
 				frame: "inline",
@@ -865,6 +894,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	/** Head data for one summary row: the path (+ selector) target, its link, correction and conflicts. */
 	#nativeRowHead(row: ReadSummaryRow): NativeToolHead {
+		if (this.toolName === "swarm_read") return { target: row.targetPath, targetKind: "text" };
 		const split = splitPathAndSel(row.targetPath);
 		const filePath = shortenPath(split.sel ? split.path : row.targetPath);
 		const correctedFrom = this.#correctedFromForTargets(row.targets);
@@ -882,6 +912,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	/** One 22px group row: status glyph, path and range, conflicts chip, then the correction or error message. */
 	#nativeFileRow(row: ReadSummaryRow): NativeNode {
+		if (this.toolName === "swarm_read") {
+			const status = this.#statusForTargets(row.targets);
+			return keyed(text(row.targetPath, { tone: READ_STATUS_TONE[status], wrap: "word" }), row.targetPath);
+		}
 		const split = splitPathAndSel(row.targetPath);
 		const status = this.#statusForTargets(row.targets);
 		const correctedFrom = this.#correctedFromForTargets(row.targets);
@@ -917,6 +951,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	/** One read's content, clamped per file while the group is collapsed. */
 	#nativePreview(entry: ReadEntry): NativeChild[] {
+		if (this.toolName === "swarm_read") {
+			return [
+				text(entry.contentText ?? "", {
+					wrap: "word",
+					lines: entry.expanded ? undefined : COLLAPSED_PREVIEW_LINES,
+				}),
+			];
+		}
 		if (previewsMarkdown(entry)) {
 			return [
 				keyed(
@@ -956,7 +998,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const usageByRow = this.#usageRowsBySummaryRow(rows);
 		const previews = entries.filter(entry => this.#shouldRenderPreview(entry));
 		const status = this.#groupStatus(entries);
-		const title = span("Read", "toolTitle");
+		const title = span(this.#label, "toolTitle");
 		const children: NativeChild[] = [];
 		let head: TspSpan[] = [title];
 		if (rows.length === 1) {
@@ -1003,7 +1045,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				node(
 					"card",
 					{
-						role: "omp.tool.read.preview",
+						role: `omp.tool.${this.toolName}.preview`,
 						tone: READ_STATUS_TONE[entry.status],
 						head: pathValue ? [title, span(" "), span(pathValue, "path")] : [title],
 						collapsible: true,
@@ -1011,14 +1053,16 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						preview: { lines: COLLAPSED_PREVIEW_LINES },
 					},
 					[
-						previewsMarkdown(entry)
-							? md(entry.contentText ?? "")
-							: code(entry.contentText ?? "", {
-									path: split.path,
-									start: entry.codeStartLine,
-									numbers: true,
-									wrap: true,
-								}),
+						this.toolName === "swarm_read"
+							? text(entry.contentText ?? "", { wrap: "word" })
+							: previewsMarkdown(entry)
+								? md(entry.contentText ?? "")
+								: code(entry.contentText ?? "", {
+										path: split.path,
+										start: entry.codeStartLine,
+										numbers: true,
+										wrap: true,
+									}),
 					],
 					`p${entry.toolCallId}`,
 				),
@@ -1028,7 +1072,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		}
 		return card(
 			{
-				role: "omp.tool.read",
+				role: `omp.tool.${this.toolName}`,
 				// A group is plain rows: the per-file previews are the only frames.
 				variant: "bare",
 				status,
@@ -1049,6 +1093,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	/** Path spans for a summary row: linked path, selector, correction note and conflict badge. */
 	#nativePathSpans(row: ReadSummaryRow): TspSpan[] {
+		if (this.toolName === "swarm_read") return [span(row.targetPath, "toolOutput")];
 		const split = splitPathAndSel(row.targetPath);
 		const filePath = shortenPath(split.sel ? split.path : row.targetPath);
 		const linkPath = linkPathForTargets(row.targets);
@@ -1085,7 +1130,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		);
 
 		if (displayRows.length === 0) {
-			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
+			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold(this.#label))}`);
 			this.addChild(this.#text);
 			return;
 		}
@@ -1095,7 +1140,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			if (!this.#shouldRenderPreviewRow(row)) {
 				const statusSymbol = formatStatusIcon(this.#statusForTargets(row.targets), theme);
 				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
-				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
+				const lines = [
+					` ${statusSymbol} ${theme.fg("toolTitle", theme.bold(this.#label))} ${pathDisplay}`.trimEnd(),
+				];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
 				this.#text.setText(lines.join("\n"));
@@ -1108,7 +1155,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			return;
 		}
 
-		const header = `${theme.fg("toolTitle", theme.bold("Read"))}${theme.fg("dim", ` (${displayRows.length})`)}`;
+		const header = `${theme.fg("toolTitle", theme.bold(this.#label))}${theme.fg("dim", ` (${displayRows.length})`)}`;
 		const lines = [` ${theme.format.bullet} ${header}`];
 		const entriesWithoutPreview = entries.filter(entry => !this.#shouldRenderPreview(entry));
 		const summaryTargets = this.#displayTargetsForEntries(entriesWithoutPreview);
@@ -1130,6 +1177,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#displayTargetsForEntries(entries: readonly ReadEntry[]): ReadDisplayTarget[] {
+		if (this.toolName === "swarm_read") {
+			return entries.map(entry => ({ entry, targetPath: entry.path, basePath: entry.path }));
+		}
 		const targets: ReadDisplayTarget[] = [];
 		for (const entry of entries) {
 			const pathSpecs: ReadDisplayPathSpec[] =
@@ -1327,6 +1377,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			basePath?: string;
 		} = {},
 	): string {
+		if (this.toolName === "swarm_read") return theme.fg("toolOutput", value);
 		const { basePath } = options;
 		const split =
 			basePath !== undefined && value.startsWith(`${basePath}:`)
@@ -1364,6 +1415,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * When expanded: shows full content.
 	 */
 	#addContentPreview(entry: ReadEntry): void {
+		if (this.toolName === "swarm_read") {
+			const options = { expanded: entry.expanded, isPartial: false };
+			const component = entry.result
+				? swarmReadToolRenderer.renderResult(entry.result, options, theme, entry.args)
+				: swarmReadToolRenderer.renderCall(entry.args, options, theme);
+			if (component) this.addChild(component);
+			return;
+		}
 		const split = splitPathAndSel(entry.path);
 		const lang = getLanguageFromPath(split.path);
 		const pathValue = shortenPath(entry.path);
@@ -1444,6 +1503,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
-		return this.#showContentPreview && entry.contentText !== undefined;
+		return (
+			(this.#showContentPreview || (this.toolName === "swarm_read" && entry.expanded)) &&
+			entry.contentText !== undefined
+		);
 	}
 }

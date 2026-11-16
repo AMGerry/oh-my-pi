@@ -1,0 +1,1 @@
+swarm://: lists swarm boards; swarm://<id>[?tab=board|members|overview&since=N] reads one board as Markdown: roster (role, state, model, wake, unread, last post), channels, and the feed in `#seq` order, 200 posts per page after `since`. Cite posts by `#seq`; reading a board leaves every cursor in place, so use `swarm_read` to advance your own.

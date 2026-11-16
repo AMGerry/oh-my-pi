@@ -245,9 +245,15 @@ export class ChatTranscriptBuilder {
 		previous.seal();
 	}
 
-	#ensureReadGroup(): ReadToolGroupComponent {
+	#ensureReadGroup(toolName = "read"): ReadToolGroupComponent {
+		const kind = toolName === "swarm_read" ? "swarm_read" : "read";
+		if (this.#readGroup && this.#readGroup.toolName !== kind) {
+			this.#readGroup.seal();
+			this.#readGroup = null;
+		}
 		if (!this.#readGroup) {
 			this.#readGroup = new ReadToolGroupComponent({
+				toolName: kind,
 				showContentPreview: displayPreferences.readToolResultPreview,
 				// Extension presenters draw only the live main transcript; every replay draws stock cards.
 				transcriptPresenters: false,
@@ -494,9 +500,9 @@ export class ChatTranscriptBuilder {
 			this.#resolveWaitingPoll(renderToolName);
 
 			const afterToolSegment = timeline.afterToolCalls.get(content.id);
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
+			if (readArgsCollapseIntoGroup(content.arguments, renderToolName)) {
 				if (hasErrorStop && errorMessage) {
-					const group = this.#ensureReadGroup();
+					const group = this.#ensureReadGroup(renderToolName);
 					group.updateArgs(content.arguments, content.id);
 					group.updateResult(
 						{ content: [{ type: "text", text: errorMessage }], isError: true },
@@ -504,7 +510,7 @@ export class ChatTranscriptBuilder {
 						content.id,
 					);
 				} else if (afterToolSegment) {
-					const group = this.#ensureReadGroup();
+					const group = this.#ensureReadGroup(renderToolName);
 					group.updateArgs(content.arguments, content.id);
 					this.#pendingTools.set(content.id, group);
 				} else {
@@ -580,11 +586,13 @@ export class ChatTranscriptBuilder {
 		// aliased results route under the canonical name their call was built with.
 		const tool = this.#deps.getTool?.(message.toolName);
 		const renderToolName = toolRenderName(message.toolName, tool);
-		const isReadGroupResult = renderToolName === "read" && (!pending || pending instanceof ReadToolGroupComponent);
+		const isReadGroupResult =
+			(renderToolName === "read" || renderToolName === "swarm_read") &&
+			(!pending || pending instanceof ReadToolGroupComponent);
 		if (isReadGroupResult) {
 			let component = pending;
 			if (!component) {
-				const group = this.#ensureReadGroup();
+				const group = this.#ensureReadGroup(renderToolName);
 				const args = this.#readArgs.get(message.toolCallId);
 				if (args) group.updateArgs(args, message.toolCallId);
 				component = group;

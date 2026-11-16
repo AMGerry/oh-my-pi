@@ -1397,15 +1397,17 @@ export class ToolExecutionComponent extends Container {
 	 */
 	#describeTool(host: NativeHostKinds): NativeNode {
 		const view = this.#nativeView(host);
-		const status = this.#nativeStatus();
+		const lifecycle = this.#nativeStatus();
+		const passive = view.passive === true && lifecycle === "running";
+		const status: TspCardStatus = passive ? "pending" : lifecycle;
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
 		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
 		if (late.section) body.push(late.section);
 		const inline = view.inline === true;
 		const hasBody = body.length > 0;
-		const ms = this.#elapsedMs(status);
-		const live = status === "running" || status === "pending";
+		const ms = passive ? undefined : this.#elapsedMs(status);
+		const live = !passive && (status === "running" || status === "pending");
 		const intent = isRecord(this.#args) ? this.#args[INTENT_FIELD] : undefined;
 		const badges = [...(head?.badges ?? []), ...(late.chip ? [late.chip] : [])];
 		const title: TspText = head?.title ?? (head ? this.#toolLabel : (view.head ?? this.#toolLabel));
@@ -1467,7 +1469,9 @@ export class ToolExecutionComponent extends Container {
 
 	#describeCard(host: NativeHostKinds): NativeNode {
 		const view = this.#nativeView(host);
-		const status = this.#nativeStatus();
+		const lifecycle = this.#nativeStatus();
+		const passive = view.passive === true && lifecycle === "running";
+		const status: TspCardStatus = passive ? "pending" : lifecycle;
 		const late = this.#lateDiagnosticsParts();
 		const fallbackHead = this.#fallbackHead(view);
 		const headChildren: NativeChild[] = [
@@ -1480,7 +1484,7 @@ export class ToolExecutionComponent extends Container {
 			}),
 		];
 		const started = this.#executionStartedAtNow;
-		if (started !== undefined) {
+		if (started !== undefined && !passive) {
 			const ended = status === "running" ? undefined : this.#executionEndedAtNow;
 			const took = Math.max(0, Math.round((ended ?? performance.now()) - started));
 			headChildren.push(node("elapsed", ended === undefined ? { age: took } : { age: took, stopped: took }));
@@ -1566,6 +1570,7 @@ export class ToolExecutionComponent extends Container {
 				preview: resultView.preview ?? callView.preview,
 				open: resultView.open ?? callView.open,
 				inline: resultView.inline ?? callView.inline,
+				passive: resultView.passive ?? callView.passive,
 				tools: resultView.tools ?? callView.tools,
 			};
 		} catch (err) {

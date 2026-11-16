@@ -145,6 +145,7 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { SwarmRuntime } from "../swarm/runtime";
+import { cfgSwarmEnabled } from "../swarm/settings";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
@@ -2219,7 +2220,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
 		this.#eventBusUnsubscribers.push(
 			onNativeRenderingChange(() => {
-				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				if (
+					cfgSwarmEnabled.get(this.settings) ||
+					(this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0
+				)
+					this.#redrawExtensionLinks();
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
@@ -2364,6 +2369,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.#eventBusUnsubscribers.push(
+			cfgSwarmEnabled.listen(this.settings, enabled => {
+				if (!enabled) this.#selectorController.closeSwarmBoard();
+				this.#inputController.setupKeyHandlers();
+				this.syncExtensionLinks();
+			}),
+		);
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -2667,6 +2679,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						(error: unknown) =>
 							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 					);
+					return;
+				case "swarm-board":
+					this.showSwarmBoard(action.url);
 					return;
 				case "spotlight":
 					void this.#showSpotlightSheet(action.spotlight, action.reduced);
@@ -4458,7 +4473,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const before = extensionLinksVersion();
 		const viewed = this.viewSession.extensionRunner;
 		viewed?.followSuspension(this.session.extensionRunner);
-		setExtensionLinks(viewed?.getLinkSchemes() ?? []);
+		const schemes = new Set(viewed?.getLinkSchemes() ?? []);
+		if (cfgSwarmEnabled.get(this.settings)) schemes.add("swarm");
+		setExtensionLinks(schemes);
 		return extensionLinksVersion() !== before;
 	}
 
@@ -4499,6 +4516,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Raise `link_activate` for `url` on `runner`, the extension runner of the transcript it was drawn in. */
 	#activateLink(url: string, runner: ExtensionRunner | undefined): boolean {
+		if (/^swarm:/i.test(url) && cfgSwarmEnabled.get(this.settings)) {
+			this.showSwarmBoard(url);
+			return true;
+		}
 		if (!runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
 		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
@@ -8206,6 +8227,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
+		this.#selectorController.closeSwarmBoard();
 		if (this.#ownsStartedUi) {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
@@ -9249,6 +9271,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async prepareSessionSwitch(): Promise<void> {
+		this.#selectorController.closeSwarmBoard();
 		this.#clearJudgmentBatchProgress(true);
 		await this.#btwController.dispose();
 		this.#omfgController.dispose();
@@ -9498,6 +9521,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showAgentHub(options?: AgentHubOpenOptions): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
+	}
+
+	showSwarmBoard(url?: string): void {
+		this.#selectorController.showSwarmBoard(url);
 	}
 
 	resetObserverRegistry(): void {

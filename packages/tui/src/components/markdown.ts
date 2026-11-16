@@ -1272,6 +1272,25 @@ const boundedAutolinkExtension: TokenizerAndRendererExtension = {
 		return { type: "text", raw, text: raw };
 	},
 };
+
+/** Shared-board addresses use the same link targets as explicit Markdown links. */
+const swarmLinkExtension: TokenizerAndRendererExtension = {
+	name: "swarmLink",
+	level: "inline",
+	start(src) {
+		const index = src.search(/<?swarm:\/\//i);
+		return index < 0 ? undefined : index;
+	},
+	tokenizer(src, tokens) {
+		const match = /^(?:<(swarm:\/\/[^\s<>`]+)>|(swarm:\/\/[^\s<>`"']+))/i.exec(src);
+		if (!match) return undefined;
+		const previous = tokens.at(-1)?.raw?.at(-1);
+		if (!match[1] && previous !== undefined && !VALID_AUTOLINK_LEFT_BOUNDARY.test(previous)) return undefined;
+		const href = match[1] ?? match[2]!.replace(/[.,!?;:)\]}]+$/, "");
+		const raw = match[1] ? match[0] : href;
+		return { type: "link", raw, href, title: null, text: href, tokens: [{ type: "text", raw: href, text: href }] };
+	},
+};
 markdownParser.use({
 	extensions: [
 		customHrExtension,
@@ -1279,6 +1298,7 @@ markdownParser.use({
 		mathEnvBlockExtension,
 		mathExtension,
 		boundedAutolinkExtension,
+		swarmLinkExtension,
 		strikethroughExtension,
 	],
 });
@@ -2097,7 +2117,7 @@ function soleDisplayMath(tokens?: Token[]): (Token & { text: string }) | null {
 	return math;
 }
 
-function plainInlineTokens(tokens: Token[]): string {
+export function plainInlineTokens(tokens: Token[]): string {
 	let result = "";
 	for (const token of tokens) {
 		if (isMathToken(token)) {
