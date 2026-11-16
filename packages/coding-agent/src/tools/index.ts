@@ -107,12 +107,15 @@ import { cfgGoalEnabled } from "../goals/settings";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgSwarmEnabled } from "../swarm/settings";
+import { SwarmTool } from "../swarm/tools/swarm";
 
 export * from "../edit";
 export * from "../goals";
 export * from "../lsp";
 export * from "@oh-my-pi/pi-tui/tools/streaming-output";
 export * from "../task";
+export * from "../swarm/tools/swarm";
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
@@ -630,6 +633,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
 	wait: s => new WaitTool(s),
+	swarm: s => new SwarmTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
@@ -797,6 +801,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
+		if (name === "swarm") return cfgSwarmEnabled.get(session.settings);
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
 		// Without an edit tool, bash is the remaining way to modify existing files.
 		if (name === "edit") return !editDisabled;

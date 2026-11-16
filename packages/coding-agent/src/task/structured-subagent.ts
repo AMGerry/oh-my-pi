@@ -5,6 +5,7 @@
  * every decision that affects what a child may run lives here.
  */
 import * as fs from "node:fs/promises";
+import type { SwarmMemberContext } from "../swarm/context";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
@@ -127,7 +128,13 @@ export interface StructuredSubagentIdentity {
 export interface StructuredSubagentRequest {
 	session: ToolSession;
 	invocationKind: "task" | "eval";
+	/** Native frontend whose setting exposes this exact model selector; model grants remain shared. */
+	modelSurface?: { kind: "swarm"; coordinatorModel: string };
 	assignment: string;
+	/** Seed a member from persisted conversation history. */
+	forkFrom?: string;
+	/** Durable shared-board identity of an ordinary task member. */
+	swarmContext?: SwarmMemberContext;
 	context?: string;
 	/**
 	 * Ordered stages sent instead of `assignment`, one prompt per delivered stage (see `./steps`);
@@ -355,9 +362,10 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 	}
 }
 
-/** The per-call gate's refusal for `invocationKind` calls, or `undefined` when `task.perCallModel` allows them. */
-function perCallModelDisabledReason(settings: Settings, invocationKind: "task" | "eval"): string | undefined {
+/** The frontend's model-selector gate; the operator-grant check follows selection. */
+function perCallModelDisabledReason(settings: Settings, invocationKind: "task" | "eval" | "swarm"): string | undefined {
 	if (perCallModelEnabled(settings, invocationKind)) return undefined;
+	if (invocationKind === "swarm") return "Swarm is disabled (swarm.enabled: false).";
 	const mode = cfgTaskPerCallModel.get(settings);
 	const operatorMode = cfgTaskPerCallModel.get(settings.grantAuthority());
 	// Project settings can turn the gate off but never on, so name both values when they differ.
@@ -375,14 +383,13 @@ export function normalizeModelSelector<T>(model: T): T | undefined {
 }
 
 /**
- * Why a per-call `model` cannot be used before dispatch: the `task.perCallModel` gate first, so a
- * caller is never told to fix a selector it may not send, then anything but one exact
- * `provider/model-id[:level]` selector. `undefined` when there is no problem.
+ * Checks the frontend gate and then the exact `provider/model-id[@upstream][:level]`
+ * selector. Returns `undefined` for an accepted selector.
  */
 export function invalidModelSelectorReason(
 	model: unknown,
 	label: string,
-	gate: { settings: Settings; invocationKind: "task" | "eval" },
+	gate: { settings: Settings; invocationKind: "task" | "eval" | "swarm" },
 ): string | undefined {
 	if (normalizeModelSelector(model) === undefined) return undefined;
 	const disabled = perCallModelDisabledReason(gate.settings, gate.invocationKind);
@@ -412,7 +419,7 @@ function preflightPerCallModel(
 		throw new StructuredSubagentError("preflight", message);
 	};
 	if (request.model !== undefined) fail("A call cannot supply both a host model and a per-call model.");
-	const disabled = perCallModelDisabledReason(settings, request.invocationKind);
+	const disabled = perCallModelDisabledReason(settings, request.modelSurface?.kind ?? request.invocationKind);
 	if (disabled) fail(disabled);
 	if (hasModelOverride) {
 		fail(
@@ -426,7 +433,7 @@ function preflightPerCallModel(
 	}
 	const selectorProblem = invalidModelSelectorReason(selector, "The call", {
 		settings,
-		invocationKind: request.invocationKind,
+		invocationKind: request.modelSurface?.kind ?? request.invocationKind,
 	});
 	if (selectorProblem) fail(selectorProblem);
 	const perCallModel = selector as string;
@@ -435,7 +442,7 @@ function preflightPerCallModel(
 		agentName: agent.name,
 		agentModel: agent.model,
 		agentSource: agent.source,
-		parentModelPattern,
+		parentModelPattern: request.modelSurface?.coordinatorModel ?? parentModelPattern,
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
 	// A cold registry is checked again in the executor once models are loaded.
@@ -790,6 +797,8 @@ function buildExecutorOptions(
 					outputSchemaMode: policy.schema.mode,
 				}),
 		sessionFile: lease.sessionFile,
+		forkFrom: request.forkFrom,
+		swarmContext: request.swarmContext,
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,

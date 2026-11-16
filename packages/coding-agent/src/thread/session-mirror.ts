@@ -313,6 +313,15 @@ export type SessionBridgeProtocol = {
 	subscribeRunState: RpcMethod<[session: AgentSessionHandle, listener: (state: SessionRunState) => void], () => void>;
 	prompt: RpcMethod<[session: AgentSessionHandle, text: string, options?: PromptOptions], boolean>;
 	steer: RpcMethod<[session: AgentSessionHandle, text: string, images?: ImageContent[], options?: SteerOptions], void>;
+	setModelTemporary: RpcMethod<
+		[
+			session: AgentSessionHandle,
+			model: Model,
+			thinkingLevel?: ConfiguredThinkingLevel,
+			options?: { ephemeral?: boolean },
+		],
+		void
+	>;
 	abort: RpcMethod<[session: AgentSessionHandle, options?: SessionAbortOptions], void>;
 	dispose: RpcMethod<[session: AgentSessionHandle, options?: AgentSessionDisposeOptions], void>;
 	deliverIrcMessage: RpcMethod<[session: AgentSessionHandle, msg: IrcMessage], "injected" | "woken">;

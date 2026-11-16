@@ -26,6 +26,7 @@ import type {
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
+import type { PreparedSwarmMember, SwarmLaunchPlan } from "../swarm/context";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -60,6 +61,7 @@ import {
 	invalidModelSelectorReason,
 	normalizeModelSelector,
 	renderSubagentUserPrompt,
+	reserveStructuredSubagentId,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
@@ -1033,6 +1035,68 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
 		return new TaskTool(session, await TaskTool.discoverAgents(session));
+	}
+
+	/** Prepare a durable native task member; the shared board commits its brief before start. */
+	async prepareSwarmMember(plan: SwarmLaunchPlan): Promise<PreparedSwarmMember> {
+		await this.session.sessionManager?.ensureOnDisk();
+		if (!this.session.getSessionFile()) {
+			throw new StructuredSubagentError("preflight", "Swarm members require a persisted coordinator session");
+		}
+		const request: StructuredSubagentRequest = {
+			session: { ...this.session, cwd: plan.cwd },
+			invocationKind: "task",
+			modelSurface: { kind: "swarm", coordinatorModel: plan.coordinatorModel },
+			agent: "swarm",
+			assignment: plan.brief,
+			perCallModel: plan.model,
+			structured: false,
+			keepAlive: true,
+			enableIrc: true,
+			maxRuntimeMs: 0,
+			detached: true,
+			forkFrom: plan.forkFrom,
+		};
+		const policy = await resolveEffectiveSubagentPolicy(request);
+		const model = policy.modelOverride?.[0];
+		if (!model) throw new StructuredSubagentError("preflight", "The member's requested model could not be resolved");
+		const agentId = await reserveStructuredSubagentId(request.session, { label: plan.name });
+		request.identity = { id: agentId, label: plan.name };
+		request.swarmContext = { ...plan.context, agentId };
+		let started = false;
+		return {
+			agentId,
+			model,
+			start: async (brief, onSettled) => {
+				if (started) throw new Error(`Member ${agentId} has already started`);
+				started = true;
+				request.assignment = brief;
+				const registry = AgentRegistry.global();
+				const ready = Promise.withResolvers<void>();
+				const stop = registry.onChange(event => {
+					if (event.ref.id === agentId && event.ref.status === "running") ready.resolve();
+				});
+				const completion = runStructuredSubagent(request).then(
+					async execution => {
+						await onSettled({
+							model: execution.result.resolvedModel,
+							error:
+								execution.result.error ?? (execution.result.exitCode !== 0 ? "Member task failed" : undefined),
+						});
+					},
+					async error => {
+						await onSettled({ error: error instanceof Error ? error.message : String(error) });
+						throw error;
+					},
+				);
+				void completion.catch(error => logger.error("Swarm member task failed", { agentId, error: String(error) }));
+				try {
+					await Promise.race([ready.promise, completion]);
+				} finally {
+					stop();
+				}
+			},
+		};
 	}
 
 	async execute(

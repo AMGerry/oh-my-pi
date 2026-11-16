@@ -37,6 +37,8 @@ export const memberSchema = type({
 	workspace: "'inherit' | 'share' | 'branch'",
 	"workspacePath?": "string",
 	"workspaceBranch?": "string",
+	"workspaceBase?": "string",
+	"workspaceSource?": "string",
 	killed: "boolean",
 	"forkOf?": "string",
 	"error?": "string",
