@@ -16,7 +16,7 @@ import {
 import { reset as resetCapabilities } from "../capability";
 import { skillCapability } from "../capability/skill";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
-import type { Settings } from "../config/settings";
+import { settings as globalSettings, type Settings } from "../config/settings";
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "./settings";
 import {
 	type Skill as CapabilitySkill,
@@ -37,6 +37,8 @@ import userInvocationTemplate from "../prompts/skills/user-invocation.md" with {
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
 import type { SkillPromptDetails } from "../session/messages";
 import { expandTilde } from "../tools/path-utils";
+import { cfgSwarmEnabled } from "../swarm/settings";
+import { BUNDLED_SWARM_PROVIDER_ID, SWARM_SKILL_NAMES } from "../swarm/skills";
 
 export { allowsSkillTokens, SKILL_TOKEN_RE };
 
@@ -55,6 +57,8 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
+	/** Keeps model discovery and skill:// access while suppressing /skill:<name>. */
+	disableSlashCommand?: boolean;
 	/**
 	 * Filesystem-resolved plugin root for Agent Plugin skills (spec §4.1):
 	 * every `skill://` resource access must realpath-resolve within it.
@@ -166,6 +170,10 @@ function resolveCollision(
 	}
 
 	const bareSkill = skillMap.get(candidate.name);
+	if (candidate._source?.provider === BUNDLED_SWARM_PROVIDER_ID) return undefined;
+	if (bareSkill?._source?.provider === BUNDLED_SWARM_PROVIDER_ID) {
+		return { name: candidate.name, dropped: [candidate.name] };
+	}
 	const candidateInstalled = candidate._source?.provider === SKILLSHARE_PROVIDER_ID;
 	const bareInstalled = bareSkill?._source?.provider === SKILLSHARE_PROVIDER_ID;
 	const candidateCustom = candidate._source?.provider === CUSTOM_DIR_PROVIDER_ID;
@@ -278,6 +286,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...(capSkill.frontmatter?.disableSlashCommand === true && { disableSlashCommand: true }),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -287,6 +296,10 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/** Native user configuration directory for this discovery. */
+	agentDir?: string;
+	/** Effective session settings, including the swarm feature switch. */
+	settings?: Settings;
 	/** Disabled extension ids (`disabledExtensions`); `skill:<name>` entries hide those skills. */
 	disabledExtensions?: string[];
 	/**
@@ -324,6 +337,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	if (!enabled) {
 		return { skills: [], warnings: [] };
 	}
+	let swarmEnabled = true;
+	try {
+		swarmEnabled = cfgSwarmEnabled.get(options.settings ?? globalSettings);
+	} catch (error) {
+		if (options.settings) throw error;
+	}
 	function isSourceEnabled(source: SourceMeta): boolean {
 		const { provider, level } = source;
 		// Managed skills (auto-learn) are OMP-native and discovered unconditionally
@@ -352,6 +371,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
 		cwd,
 		disabledExtensions,
+		agentDir: options.agentDir ?? options.settings?.getAgentDir(),
+		excludeProviders: swarmEnabled ? undefined : [BUNDLED_SWARM_PROVIDER_ID],
 		extensionRoots,
 	});
 
@@ -386,6 +407,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const filteredSkills = result.all.filter(capSkill => {
 		if (capSkill._source.provider === MANAGED_SKILLS_PROVIDER_ID) return false;
 		if (disabledSkillNames.has(capSkill.name)) return false;
+		if (!swarmEnabled && SWARM_SKILL_NAMES.includes(capSkill.name)) return false;
 		if (!isSourceEnabled(capSkill._source)) return false;
 		return !matchesIgnorePatterns(capSkill.name);
 	});
@@ -409,6 +431,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		frontmatter: SkillFrontmatter | undefined,
 		namespace: string,
 	): string | undefined {
+		if (!swarmEnabled && SWARM_SKILL_NAMES.includes(skill.name)) return undefined;
 		if (/[\\/]/.test(skill.name)) {
 			collisionWarnings.push({
 				skillPath: skill.filePath,
@@ -477,6 +500,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...(capSkill.frontmatter?.disableSlashCommand === true && { disableSlashCommand: true }),
 			_source: capSkill._source,
 		};
 		if (admit(skill, capSkill.content, capSkill.frontmatter, skillNamespace(capSkill)) !== undefined)
@@ -520,6 +544,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					...(capSkill.frontmatter?.disableSlashCommand === true && { disableSlashCommand: true }),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -558,6 +583,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const managedCandidates = result.all.filter(
 		capSkill =>
 			capSkill._source.provider === MANAGED_SKILLS_PROVIDER_ID &&
+			(swarmEnabled || !SWARM_SKILL_NAMES.includes(capSkill.name)) &&
 			isValidManagedSkillName(capSkill.name) &&
 			!disabledSkillNames.has(capSkill.name) &&
 			!matchesIgnorePatterns(capSkill.name) &&
@@ -603,6 +629,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...(capSkill.frontmatter?.disableSlashCommand === true && { disableSlashCommand: true }),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);
@@ -644,6 +671,7 @@ export interface SkillRediscoveryHost {
 	rediscoverForUnknownName?: () => Promise<readonly Skill[]> | undefined;
 	/** Settings for a one-off discovery; without them a fixed list cannot be re-pointed. */
 	settings?: Settings;
+	agentDir?: string;
 	cwd?: string;
 	extensionRoots?: EffectiveExtensionRoots;
 }
@@ -692,6 +720,8 @@ async function rediscoverHostSkills(host: SkillRediscoveryHost): Promise<readonl
 		cwd: host.cwd,
 		disabledExtensions: cfgDisabledExtensions.get(host.settings),
 		extensionRoots: host.extensionRoots,
+		settings: host.settings,
+		agentDir: host.agentDir,
 	});
 	const repointed: Skill[] = [];
 	for (const skill of host.skills) {

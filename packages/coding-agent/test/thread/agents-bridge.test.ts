@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -12,12 +15,14 @@ import type { AgentSessionHandle } from "../../src/session/agent-session-handle"
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { SwarmRuntime } from "../../src/swarm/runtime";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
 import type { AgentsProbe, AgentsProbeGlobals } from "../fixtures/agents-bridge-worker";
+import { makeMember } from "../swarm/fixtures";
 
 const cleanups: Array<() => unknown> = [];
 
@@ -263,5 +268,50 @@ describe("agent bridging across subagent workers", () => {
 		expect(liveRef("W1").session).toBe(revived);
 		expect(liveRef("W1").status).toBe("idle");
 		expect(worker.load).toBe(1);
+	});
+
+	it("resumes a worker-homed swarm member's quota-failed turn on its own after main switches its model", async () => {
+		const { probe } = await startWorker();
+		await probe.open("Q1", { quotaFirst: true });
+		await probe.prompt("Q1", "Build the parser");
+		await waitFor(() => liveRef("Q1").status === "idle" && !mirrorOf(liveRef("Q1").session).isStreaming);
+		expect(await probe.models("Q1")).toEqual(["claude-sonnet-4-5"]);
+
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-agents-bridge-swarm-"));
+		const sessionFile = path.join(cwd, "coordinator.jsonl");
+		AgentRegistry.global().register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "idle",
+		});
+		const runtime = new SwarmRuntime(AgentRegistry.global(), AgentLifecycleManager.global());
+		cleanups.push(() => {
+			runtime.dispose();
+			fs.rmSync(cwd, { recursive: true, force: true });
+		});
+		const coordinator = await runtime.ensure({
+			agentId: "Main",
+			cwd,
+			sessionFile,
+			artifactsDir: path.join(cwd, "artifacts"),
+			model: "mock/parent",
+			maxMembers: 32,
+		});
+		const board = runtime.board(coordinator.id);
+		board.addMember(
+			"q1",
+			makeMember("Q1", { model: "anthropic/claude-sonnet-4-5", owner: "coordinator", error: "quota" }),
+		);
+
+		const replacement = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!replacement) throw new Error("bundled replacement model missing");
+		// Main holds a mirror of the worker session: the switch and the retry both cross the session bridge.
+		await runtime.switchModel(coordinator, "q1", replacement);
+		await waitFor(async () => (await probe.models("Q1")).length === 2);
+		expect(await probe.models("Q1")).toEqual(["claude-sonnet-4-5", "claude-sonnet-4-6"]);
+		expect(board.member("q1").error).toBeUndefined();
 	});
 });

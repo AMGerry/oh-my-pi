@@ -322,6 +322,7 @@ export type SessionBridgeProtocol = {
 		],
 		void
 	>;
+	retry: RpcMethod<[session: AgentSessionHandle], boolean>;
 	abort: RpcMethod<[session: AgentSessionHandle, options?: SessionAbortOptions], void>;
 	dispose: RpcMethod<[session: AgentSessionHandle, options?: AgentSessionDisposeOptions], void>;
 	deliverIrcMessage: RpcMethod<[session: AgentSessionHandle, msg: IrcMessage], "injected" | "woken">;

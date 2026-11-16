@@ -38,8 +38,11 @@ export interface PeerReport {
 /** Operations the test drives on the worker. */
 export interface AgentsProbe {
 	threadId(): Promise<string>;
-	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
-	open(id: string, options: { sessionFile?: string; gated?: boolean }): Promise<string>;
+	/**
+	 * Build a real session (mock model) and register it as `id` in the (remote) registry. `quotaFirst` fails the
+	 * first model call on quota (auto-retry off) and answers every later one.
+	 */
+	open(id: string, options: { sessionFile?: string; gated?: boolean; quotaFirst?: boolean }): Promise<string>;
 	/** Run a prompt on the local session to completion. */
 	prompt(id: string, text: string): Promise<void>;
 	/** Let gated model calls answer. */
@@ -66,6 +69,8 @@ export interface AgentsProbe {
 	disposed(key: string): Promise<boolean>;
 	/** Whether the worker's lifecycle proxy manages the worker's registry proxy. */
 	manages(): Promise<boolean>;
+	/** Model id of every model call the local session of `id` made, in order. */
+	models(id: string): Promise<string[]>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -80,16 +85,21 @@ const sessions = new Map<string, AgentSession>();
 const byKey = new Map<string, AgentSession>();
 const grabbed = new Map<string, AgentRef>();
 const peerSeen: { events: string[]; runStates: string[] } = { events: [], runStates: [] };
+const modelCalls = new Map<string, string[]>();
 let threadName = "";
 let gate = Promise.withResolvers<void>();
 let gateOpen = false;
 
-async function makeSession(id: string, gated: boolean): Promise<AgentSession> {
+async function makeSession(id: string, gated: boolean, quotaFirst = false): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("bundled model missing");
+	const calls: string[] = [];
+	modelCalls.set(id, calls);
 	const mock = createMockModel({
 		handler: async () => {
 			if (gated && !gateOpen) await gate.promise;
+			if (quotaFirst && calls.length === 1)
+				return { stopReason: "error", errorMessage: "RESOURCE_EXHAUSTED quota", content: [] };
 			return { content: ["Done"] };
 		},
 	});
@@ -97,14 +107,17 @@ async function makeSession(id: string, gated: boolean): Promise<AgentSession> {
 		getApiKey: () => "test-key",
 		initialState: { model, systemPrompt: ["Test"], tools: [] },
 		convertToLlm,
-		streamFn: mock.stream,
+		streamFn: (callModel, context, options) => {
+			calls.push(callModel.id);
+			return mock.stream(callModel, context, options);
+		},
 	});
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
 	const session = new AgentSession({
 		agent,
 		sessionManager: SessionManager.inMemory(),
-		settings: Settings.isolated(),
+		settings: Settings.isolated(quotaFirst ? { "retry.enabled": false } : {}),
 		modelRegistry: new ModelRegistry(authStorage),
 		agentId: id,
 	});
@@ -122,7 +135,7 @@ function local(id: string): AgentSession {
 const probe: AgentsProbe = {
 	threadId: async () => threadName,
 	open: async (id, options) => {
-		const session = await makeSession(id, options.gated === true);
+		const session = await makeSession(id, options.gated === true, options.quotaFirst === true);
 		const registry = AgentRegistry.global();
 		registry.register({
 			id,
@@ -213,6 +226,7 @@ const probe: AgentsProbe = {
 		return session.isDisposed;
 	},
 	manages: async () => AgentLifecycleManager.global().manages(AgentRegistry.global()),
+	models: async id => [...(modelCalls.get(id) ?? [])],
 };
 
 function isProbeGlobals(value: unknown): value is AgentsProbeGlobals {

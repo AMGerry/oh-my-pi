@@ -1,0 +1,241 @@
+{
+	"schemaVersion": 1,
+	"sourceProduct": "Antigravity swarm skills",
+	"authorization": "The user permits reusing and adapting the skill content in this build and vendoring the adapted copies into the oh-my-pi tree (PORT-TO-OMP-PROMPT.md section 0.6). The permission is limited to the substitutions enumerated in section 2.4 of that document, plus the native tool, field and path names they imply and the alignment of the narrator rule, the model switch and the quota statements with the port brief, which the user approved on 2026-11-16 (ai/STATUS.md). The original SHA-256 per file and the complete diff are kept beside the vendored copies, all other skill bytes stay as published, and the skills stay credited to their source product.",
+	"files": [
+		{
+			"path": "swarm/SKILL.md",
+			"originalSha256": "5232a7982b95ce5cfc3e5c7f503af08f9006218d6f86a9f751d95289dfa80f96",
+			"adaptedSha256": "23eee65f3649e70e83a8a03176a747078fad618ec144e296e33192ccec6df82e",
+			"operations": [
+				{
+					"before": "post_message",
+					"after": "swarm_post",
+					"count": 5
+				},
+				{
+					"before": "read_board",
+					"after": "swarm_read",
+					"count": 9
+				},
+				{
+					"before": "mentions_only",
+					"after": "mentionsOnly",
+					"count": 2
+				},
+				{
+					"before": "open_board",
+					"after": "boardUri",
+					"count": 1
+				},
+				{
+					"before": "**Add a narrator, but only if the `swarm_narrator` skill is in your skill\n   list.**",
+					"after": "**Add a narrator when `swarm{action:\"status\"}` reports\n   `capabilities.narrator`.**",
+					"count": 1
+				},
+				{
+					"before": "**Add a monitor, but only if the `swarm_monitor` skill is in your skill\n   list.**",
+					"after": "**Add a monitor when `swarm{action:\"status\"}` reports\n   `capabilities.monitor`.**",
+					"count": 1
+				},
+				{
+					"before": "in the Swarm UI.",
+					"after": "in the swarm board overlay.",
+					"count": 1
+				},
+				{
+					"before": "  `swarm{action:\"models\"}` shows live `quota_remaining` and `quota_resets` for\n  each model, and `add` and `model` refuse a model whose quota is exhausted\n  unless AI credits are paying for it (`models` then says so in `quota_note`).",
+					"after": "  `swarm{action:\"models\"}` lists the models you can run and, only where omp has\n  a live usage source, shows `quotaRemaining`, `quotaResets` and `quotaNote`\n  for them.",
+					"count": 1
+				},
+				{
+					"before": "leave `model` off to use your own (since you are",
+					"after": "name your own model, as `status` shows\n  it for `coordinator` (since you are",
+					"count": 1
+				},
+				{
+					"before": "Switching another worker only works\n  when it is `waiting`, so wait for one that is `working` to stop first.",
+					"after": "Switching another worker is refused\n  while it is `working`, so wait for it to stop first.",
+					"count": 1
+				},
+				{
+					"before": "sits out until the board moves, its model is switched, or the\n  user messages it.",
+					"after": "sits out until a post names it, its model is switched, or the\n  user messages it.",
+					"count": 1
+				},
+				{
+					"before": "or, if quota is back or\n  AI credits now cover it, post to each by name so it picks up its work.",
+					"after": "or, if quota is back,\n  post to each by name so it picks up its work.",
+					"count": 1
+				}
+			]
+		},
+		{
+			"path": "swarm/logo.svg",
+			"originalSha256": "424d3cd0c6765a1d4cf2a7ebcd62bceb7e9ca1cbfa8429696618e708f73cf11a",
+			"adaptedSha256": "424d3cd0c6765a1d4cf2a7ebcd62bceb7e9ca1cbfa8429696618e708f73cf11a",
+			"operations": []
+		},
+		{
+			"path": "swarm_monitor/SKILL.md",
+			"originalSha256": "eec457f3f332db4b7d472a29dc61a8140304a9058aabcceb624e3e8b12b2894f",
+			"adaptedSha256": "8cce11a21a01ff05f7e01b808e0d67fa37d79e41dd8add9b698c1b00996ab271",
+			"operations": [
+				{
+					"before": "read_board",
+					"after": "swarm_read",
+					"count": 3
+				},
+				{
+					"before": "mentions_only",
+					"after": "mentionsOnly",
+					"count": 3
+				},
+				{
+					"before": "wake_mode",
+					"after": "wakeMode",
+					"count": 1
+				},
+				{
+					"before": "wait_since",
+					"after": "waitSince",
+					"count": 3
+				},
+				{
+					"before": "last_read_seq",
+					"after": "lastReadSeq",
+					"count": 2
+				},
+				{
+					"before": "last_post_seq",
+					"after": "lastPostSeq",
+					"count": 2
+				},
+				{
+					"before": "last_post_time",
+					"after": "lastPostTime",
+					"count": 1
+				},
+				{
+					"before": "since `tail_from_seq`).",
+					"after": "yet).",
+					"count": 1
+				},
+				{
+					"before": "`schedule{CronExpression: \"*/3 * * * *\", IsDaemon: true, Prompt: \"[monitor]",
+					"after": "`swarm_schedule{action:\"create\", cron:\"*/3 * * * *\", daemon:true, prompt:\"[monitor]",
+					"count": 1
+				},
+				{
+					"before": "Note the task id it returns",
+					"after": "Note the `id` it returns",
+					"count": 1
+				},
+				{
+					"before": "`IsDaemon` must be true",
+					"after": "`daemon` must be true",
+					"count": 1
+				},
+				{
+					"before": "`manage_task{Action: \"kill\", TaskId: <your cron>}`",
+					"after": "`swarm_schedule{action:\"kill\", id:<your cron>}`",
+					"count": 1
+				},
+				{
+					"before": "`manage_task{Action: \"list\"}`",
+					"after": "`swarm_schedule{action:\"list\"}`",
+					"count": 1
+				},
+				{
+					"before": "if your cron is not\nrunning, schedule",
+					"after": "if your cron is not\nlisted, schedule",
+					"count": 1
+				}
+			]
+		},
+		{
+			"path": "swarm_narrator/SKILL.md",
+			"originalSha256": "99b3200be99796e6377d3d8f32a283439f2d42afd3f1a418f49d1222bf5b289f",
+			"adaptedSha256": "2aea4c6a7f765b5483c9105a3b8308044245e067c117d07828519c1de4bd345a",
+			"operations": [
+				{
+					"before": "post_message",
+					"after": "swarm_post",
+					"count": 1
+				},
+				{
+					"before": "read_board",
+					"after": "swarm_read",
+					"count": 3
+				},
+				{
+					"before": "mentions_only",
+					"after": "mentionsOnly",
+					"count": 1
+				},
+				{
+					"before": "Let `SWARM_DIR` be `<your artifact directory>/swarm_view`\n(`<appData>/brain/<your conversation id>/swarm_view`, or the `SWARM_DIR` in\nyour brief if one was given).",
+					"after": "Let `SWARM_DIR` be the swarm directory from your member brief (under the\ncoordinator's session artifacts).",
+					"count": 1
+				},
+				{
+					"before": "The Swarm pane draws the Overview",
+					"after": "The swarm board overlay draws the Overview",
+					"count": 1
+				},
+				{
+					"before": "`<appData>/swarm_narrator/default_prefs.md` (and\n    `default_view.html` if the user saved a custom page). `<appData>` is the\n    part of `SWARM_DIR` before `/brain/`.",
+					"after": "`<agentDir>/swarm_narrator/default_prefs.md` (and\n    `default_view.html` if the user saved a custom page). `<agentDir>` is omp's\n    agent directory (`~/.omp/agent` by default).",
+					"count": 1
+				},
+				{
+					"before": "`file` (a path under\n    `<appData>/brain/`).",
+					"after": "`file` (an absolute path under\n    the coordinator's session artifacts, the parent of `SWARM_DIR`).",
+					"count": 1
+				},
+				{
+					"before": "<absolute path under <appData>/brain/>",
+					"after": "<absolute path under the coordinator's session artifacts>",
+					"count": 1
+				}
+			]
+		},
+		{
+			"path": "swarm_pane/SKILL.md",
+			"originalSha256": "98e5e8c7b8e062be14ccd35781204e2abae79ab4b9812613cad947712c154c4d",
+			"adaptedSha256": "60ed194baa52ecc0cbbb6d8259200c853566529783db70db61bde8df8ddb0fb1",
+			"operations": [
+				{
+					"before": "the Swarm UI's Overview",
+					"after": "the swarm board overlay's Overview",
+					"count": 1
+				},
+				{
+					"before": "The Swarm UI's Overview",
+					"after": "The swarm board overlay's Overview",
+					"count": 1
+				},
+				{
+					"before": "The Swarm UI builds",
+					"after": "The swarm board overlay builds",
+					"count": 1
+				},
+				{
+					"before": "Don't add a narrator; this Overview replaces it. Add one only when the user\nasks for it by name.",
+					"after": "Add a narrator when `swarm{action:\"status\"}` reports `capabilities.narrator`.\nUntil the narrator publishes a view.json, this Overview is built from the board,\nthe roster and your plan file.",
+					"count": 1
+				},
+				{
+					"before": "`<appData>/brain/<your conversation id>/.system_generated/swarm/plan.json`:",
+					"after": "`<artifacts>/swarm/plan.json` (`dir` in `swarm{action:\"status\"}` plus\n`/plan.json`):",
+					"count": 1
+				},
+				{
+					"before": "under the worker's own `<appData>/brain/<conversation id>/`",
+					"after": "under the worker's own session artifacts",
+					"count": 1
+				}
+			]
+		}
+	]
+}

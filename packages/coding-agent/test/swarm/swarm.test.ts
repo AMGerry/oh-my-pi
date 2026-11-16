@@ -339,28 +339,38 @@ describe("native swarm control tool", () => {
 			error: "quota",
 		});
 		expect(f.model.calls).toHaveLength(4);
-		const blocked = await f.runtime.post(coordinator, "@revivable try again");
-		expect(blocked.receipts).toMatchObject([
-			{ name: member.name, outcome: "failed", error: expect.stringContaining("quota") },
-		]);
-		expect(f.model.calls).toHaveLength(4);
+		// A post still reaches the member, whose turn runs again on the exhausted model.
+		f.model.push({ stopReason: "error", errorMessage: "RESOURCE_EXHAUSTED quota", content: [] });
+		const retried = await f.runtime.post(coordinator, "@revivable try again");
+		expect(retried.receipts).toMatchObject([{ name: member.name, outcome: "revived" }]);
+		await untilRuntime(
+			f.runtime,
+			() =>
+				f.model.calls.length === 5 &&
+				f.registry.get(member.agentId)?.status === "parked" &&
+				f.runtime.board(snapshot.id).member(member.name).error === "quota",
+		);
+		// Switching the model retries the failed turn on the selected model; no post is needed.
+		const resumed = Promise.withResolvers<string>();
+		f.replacement.push(context => {
+			resumed.resolve(JSON.stringify(context.messages));
+			return { content: ["Resumed on the selected model"] };
+		});
 		const switched = await f.tool.execute("switch-after-quota", {
 			action: "model",
 			name: member.name,
 			model: "mock/swarm-replacement",
 		});
 		expect(switched.isError).not.toBe(true);
-		const resumed = await f.runtime.post(coordinator, "@revivable continue with the selected model");
-		expect(resumed.receipts).toMatchObject([{ name: member.name, outcome: "revived" }]);
+		expect(await resumed.promise).toContain("Preserve this exact assignment across turns");
 		await untilRuntime(f.runtime, () => f.registry.get(member.agentId)?.status === "parked");
 		expect(f.replacement.calls).toHaveLength(1);
-		expect(JSON.stringify(f.replacement.calls[0]?.context.messages)).toContain(
-			"Preserve this exact assignment across turns",
-		);
+		expect(f.model.calls).toHaveLength(5);
 		expect(f.runtime.board(snapshot.id).member(member.name)).toMatchObject({
 			model: "mock/swarm-replacement",
 			lastReadSeq: 4,
 		});
+		expect(f.runtime.board(snapshot.id).member(member.name).error).toBeUndefined();
 	});
 
 	it("gives a helper the live coordinator model across a different parent model and cold revival", async () => {
@@ -454,7 +464,7 @@ describe("native swarm control tool", () => {
 		await f.tool.execute("kill", { action: "kill", name: "forked" });
 	});
 
-	it("switches a stopped quota conversation before cold revival with the selected native model", async () => {
+	it("switches a stopped quota conversation and resumes its failed turn on the selected native model", async () => {
 		const f = await fixture();
 		const added = await f.tool.execute("quota", { action: "add", name: "quota", brief: "Preserve this assignment" });
 		await f.started.promise;
@@ -470,6 +480,11 @@ describe("native swarm control tool", () => {
 		f.response.resolve({ stopReason: "error", errorMessage: "RESOURCE_EXHAUSTED quota", content: [] });
 		await stopped.promise;
 		stop();
+		const resumed = Promise.withResolvers<string>();
+		f.replacement.push(context => {
+			resumed.resolve(JSON.stringify(context.messages));
+			return { content: ["Continued on the selected model"] };
+		});
 		const switched = await f.tool.execute("switch", {
 			action: "model",
 			name: "quota",
@@ -479,25 +494,11 @@ describe("native swarm control tool", () => {
 		expect(switched.details?.result?.members.find(candidate => candidate.name === "quota")?.model).toBe(
 			"mock/swarm-replacement",
 		);
-		const ref = f.registry.get(member.agentId)!;
-		const factory = createPersistedSubagentReviverFactory({
-			session: f.root,
-			settings: f.settings,
-			authStorage: f.authStorage,
-			modelRegistry: f.modelRegistry,
-			enableLsp: false,
-		});
-		const revive = await factory(ref);
-		expect(revive).toBeDefined();
-		const revived = await revive!(ref);
-		try {
-			expect(revived.model?.id).toBe("swarm-replacement");
-			expect(JSON.stringify(revived.messages)).toContain("Preserve this assignment");
-			await revived.prompt("Continue the same work");
-			expect(f.replacement.calls).toHaveLength(1);
-		} finally {
-			await revived.dispose();
-		}
+		// The failed turn picks up by itself in the same conversation, on the selected model.
+		expect(await resumed.promise).toContain("Preserve this assignment");
+		await untilRuntime(f.runtime, () => f.registry.get(member.agentId)?.status === "parked");
+		expect(f.replacement.calls).toHaveLength(1);
+		expect(f.runtime.board(added.details!.result!.id).member("quota").error).toBeUndefined();
 	});
 
 	it("M4 native gate: cron steers a waiting monitor, skips overlap and parks at the next wait", async () => {

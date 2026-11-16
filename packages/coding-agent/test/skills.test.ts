@@ -2,7 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bu
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
+import { disableUserSource, enableUserSource, initializeWithSettings } from "@oh-my-pi/pi-coding-agent/capability";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
@@ -65,11 +66,13 @@ const originalEnv: Record<string, string | undefined> = Object.fromEntries(
 	isolatedEnvKeys.map(key => [key, process.env[key]]),
 );
 let isolatedHome = "";
+let releaseSkillProviders: (() => void) | undefined;
 // Re-armed before every test: an inner test's `mockRestore()` on its own
 // `os.homedir` spy restores the real function, not this one.
 const isolateHomedir = () => spyOn(os, "homedir").mockReturnValue(isolatedHome);
 
 beforeAll(async () => {
+	releaseSkillProviders = initializeWithSettings(Settings.isolated({ disabledProviders: ["bundled-swarm"] }));
 	isolatedHome = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-home-")));
 	isolateHomedir();
 	for (const key of ["HOME", "USERPROFILE"] as const) {
@@ -86,6 +89,7 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
+	releaseSkillProviders?.();
 	for (const key of isolatedEnvKeys) restoreEnvValue(key, originalEnv[key]);
 	isolateHomedir().mockRestore();
 	__resetDirsFromEnvForTests();

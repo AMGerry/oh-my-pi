@@ -32,6 +32,8 @@ export const channelActionSchema = type({
 	op: "'create' | 'list' | 'subscribe' | 'unsubscribe' | 'archive'",
 	"channel?": memberNameSchema,
 	"topic?": "string",
+	/** Member or numbered group that subscribe/unsubscribe moves; omitted moves the caller. */
+	"name?": memberNameSchema,
 	"+": "reject",
 });
 export const controlSchema = type({ action: "'status'", "+": "reject" })
@@ -117,6 +119,8 @@ export interface SwarmCaller {
 	model: string;
 	context?: SwarmMemberContext;
 	maxMembers: number;
+	/** The caller's profile agent directory, where members find user defaults such as the narrator's. */
+	agentDir?: string;
 }
 
 export interface SwarmActor {

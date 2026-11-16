@@ -1154,6 +1154,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 					? Promise.resolve({ skills: [], warnings: [] })
 					: discoverSkills(cwd, agentDir, {
 							...cfgSkills.get(settings),
+							settings,
 							disabledExtensions: cfgDisabledExtensions.get(settings),
 						}),
 				this.#loadAdditionalSkills(),

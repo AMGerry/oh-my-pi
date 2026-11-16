@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { handleSkillList, runSkillsCommand } from "../../src/cli/skill-list";
 import { resetSettingsForTest } from "../../src/config/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
+import { SWARM_SKILL_NAMES } from "../../src/swarm/skills";
 import { getAgentDir, removeWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 
@@ -51,9 +52,8 @@ describe("runSkillsCommand", () => {
 				skillsSettings: { customDirectories: [path.join(skillsRoot, "first"), path.join(skillsRoot, "second")] },
 			});
 
-			// Home/agent-dir isolation (see the file-level beforeEach) means only the
-			// two fixture skills below are discoverable — pin the whole listing.
-			expect(result.skills.map(skill => skill.name)).toEqual(["calendar", "reviewer"]);
+			// The authored fixtures appear alongside the shipped swarm skills.
+			expect(result.skills.map(skill => skill.name)).toEqual(["calendar", "reviewer", ...SWARM_SKILL_NAMES]);
 			const reviewer = result.skills.find(skill => skill.name === "reviewer");
 			expect(reviewer?.description).toBe("Review code.");
 			expect(reviewer?.filePath).toBe(path.join(skillsRoot, "second", "reviewer", "SKILL.md"));
@@ -114,7 +114,7 @@ describe("runSkillsCommand", () => {
 			});
 			// The listing must agree with the loader: a tilde entry resolves
 			// against the home directory, not against the inspected directory.
-			expect(result.skills.map(skill => skill.name)).toEqual(["demo"]);
+			expect(result.skills.map(skill => skill.name)).toEqual(["demo", ...SWARM_SKILL_NAMES]);
 			expect(result.skills[0]?.filePath).toBe(path.join(skillsRoot, "demo", "SKILL.md"));
 		} finally {
 			await removeWithRetries(directory);
@@ -225,11 +225,13 @@ describe("handleSkillList", () => {
 			expect(inherited.skills.map(skill => [skill.name, skill.hide])).toEqual([
 				["alpha", true],
 				["beta", false],
+				...SWARM_SKILL_NAMES.map(name => [name, false]),
 			]);
 			const cleared = await readJson("skills:\n  manualSkills: []\n");
 			expect(cleared.skills.map(skill => [skill.name, skill.hide])).toEqual([
 				["alpha", false],
 				["beta", false],
+				...SWARM_SKILL_NAMES.map(name => [name, false]),
 			]);
 		} finally {
 			await removeWithRetries(directory);

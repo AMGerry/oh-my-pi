@@ -87,6 +87,20 @@ describe("swarm runtime waiting and delivery", () => {
 		expect(interval).not.toHaveBeenCalled();
 	});
 
+	it("keeps a member parked on the board out of its parent's wake sources until the wait settles", async () => {
+		const f = fixture();
+		expect(f.registry.awaits.blocksOn("Member-alice", "Main", 0)).toBe(false);
+		const cancel = new AbortController();
+		const alice = f.runtime.wait(f.actor("alice"), { since: 0 }, cancel.signal);
+		// The parent's open run asks exactly this (`AgentSession` wake sources): a parked member is not a reason to stay open.
+		expect(f.registry.awaits.blocksOn("Member-alice", "Main", 0)).toBe(true);
+		// A direct message sent during the wait still interrupts it, so the hold does not block that message.
+		expect(f.registry.awaits.blocksOn("Member-alice", "Main", Date.now() + 1)).toBe(false);
+		cancel.abort("tool interrupted");
+		await alice;
+		expect(f.registry.awaits.blocksOn("Member-alice", "Main", 0)).toBe(false);
+	});
+
 	it("filters channels while any-post helpers and cross-channel addresses see their own eligible posts", async () => {
 		const f = fixture();
 		f.board.setChannel("ui", makeChannel({ subscribers: ["alice"] }));

@@ -13,7 +13,7 @@ import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as oauthFlowModule from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import {
@@ -178,7 +178,7 @@ class FakeAgentSession {
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
-	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
+	skills: Skill[] = [];
 	buildUserSkillPrompt = buildSkillPromptMessage;
 	async refreshSkillsAndCommands(): Promise<void> {}
 	subscribeCommandMetadataChanged(_listener: () => void): () => void {
@@ -2548,6 +2548,14 @@ describe("ACP agent", () => {
 				baseDir: skillDir,
 				source: "test",
 			},
+			{
+				name: "swarm_monitor",
+				description: "Model-visible monitor",
+				filePath: skillPath,
+				baseDir: skillDir,
+				source: "test",
+				disableSlashCommand: true,
+			},
 		];
 		await harness.agent.prompt({
 			sessionId: created.sessionId,
@@ -2568,6 +2576,7 @@ describe("ACP agent", () => {
 		expect(names).toContain("retry");
 		expect(names).toContain("force");
 		expect(names).toContain("skill:sample");
+		expect(names).not.toContain("skill:swarm_monitor");
 		expect(names).not.toContain("settings");
 		expect(names).not.toContain("copy");
 		expect(names).not.toContain("plan");
@@ -2680,6 +2689,15 @@ describe("ACP agent", () => {
 		expect(customMessage.content).toContain(`[Skill directory: ${skillDir}]`);
 		expect(customMessage.content).toContain("User: extra context");
 		expect(session.customMessageOptions[0]).toEqual({ streamingBehavior: "steer" });
+
+		session.skills[0].disableSlashCommand = true;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000002",
+			prompt: [{ type: "text", text: "/skill:sample explicit text" }],
+		} as PromptRequest);
+		expect(session.customMessages).toHaveLength(1);
+		expect(session.promptCalls).toEqual(["/skill:sample explicit text"]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

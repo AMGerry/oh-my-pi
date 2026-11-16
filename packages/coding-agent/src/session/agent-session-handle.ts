@@ -150,6 +150,8 @@ export interface AgentSessionHandle {
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void>;
+	/** Retry the last failed assistant turn when the session is idle; false when there is none to retry. */
+	retry(): Promise<boolean>;
 	/** Abort the current operation and wait for the agent to become idle. */
 	abort(options?: {
 		goalReason?: "interrupted" | "internal";

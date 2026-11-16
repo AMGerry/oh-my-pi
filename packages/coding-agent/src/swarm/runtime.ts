@@ -5,7 +5,7 @@ import { isMainThread } from "node:worker_threads";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { getAgentDir, prompt } from "@oh-my-pi/pi-utils";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { IrcBus, type IrcBusApi } from "../irc/bus";
 import memberBriefTemplate from "../prompts/system/swarm-member.md" with { type: "text" };
@@ -361,8 +361,15 @@ export class SwarmRuntime implements SwarmApi {
 				(this.#limits.get(actor.id) ?? caller.maxMembers)
 			)
 				throw new SwarmRefusal("Adding these members would exceed swarm.maxMembers");
-			const channels = [...new Set(request.channels ?? [])];
 			const postingMember = board.member(actor.name);
+			// A worker's helper joins its adder's active channels unless the request names its own.
+			const inherited =
+				postingMember.role === "coordinator"
+					? []
+					: postingMember.channels.filter(
+							channel => channel === "main" || board.channels().get(channel)?.archived === false,
+						);
+			const channels = [...new Set(request.channels ?? inherited)];
 			if (
 				postingMember.role === "worker" &&
 				channels[0] &&
@@ -500,6 +507,7 @@ export class SwarmRuntime implements SwarmApi {
 						id: actor.id,
 						boardUri: board.boardUri,
 						dir: board.dir,
+						agentDir: caller.agentDir ?? getAgentDir(),
 						cwd: launch.member.workspacePath,
 						model: launch.prepared.model,
 						channels: channels.join(", ") || "main",
@@ -554,8 +562,7 @@ export class SwarmRuntime implements SwarmApi {
 	async kill(actor: SwarmActor, name: string): Promise<SwarmControlResult> {
 		return this.#exclusive(actor.id, async () => {
 			const board = this.#authorize(actor);
-			const targets = board.listMembers().filter(member => member.name === name || member.group === name);
-			if (!targets.length) throw new SwarmRefusal(`Unknown swarm member or group: ${name}`);
+			const targets = this.#managedTargets(board, actor, name, false);
 			if (targets.some(member => member.role === "coordinator"))
 				throw new SwarmRefusal("The coordinator owns the swarm lifetime");
 			if (targets.every(member => member.killed))
@@ -614,23 +621,27 @@ export class SwarmRuntime implements SwarmApi {
 					board.setChannel(name, { ...channel, archived: true });
 				} else {
 					if (channel.archived) throw new SwarmRefusal(`Channel ${name} is archived`);
-					const member = board.member(actor.name);
 					const subscribe = request.op === "subscribe";
-					const subscribedSince = { ...member.subscribedSince };
-					if (subscribe && !member.channels.includes(name)) subscribedSince[name] = board.head;
-					if (!subscribe) delete subscribedSince[name];
-					board.updateMember(actor.name, {
-						channels: subscribe
-							? [...new Set([...member.channels, name])]
-							: member.channels.filter(value => value !== name),
-						subscribedSince,
-					});
-					board.setChannel(name, {
-						...channel,
-						subscribers: subscribe
-							? [...new Set([...channel.subscribers, actor.name])]
-							: channel.subscribers.filter(value => value !== actor.name),
-					});
+					const targets = this.#managedTargets(board, actor, request.name ?? actor.name, true).filter(
+						member => !member.killed,
+					);
+					if (!targets.length) throw new SwarmRefusal(`Member or group ${request.name} is killed`);
+					let subscribers = channel.subscribers;
+					for (const target of targets) {
+						const subscribedSince = { ...target.subscribedSince };
+						if (subscribe && !target.channels.includes(name)) subscribedSince[name] = board.head;
+						if (!subscribe) delete subscribedSince[name];
+						board.updateMember(target.name, {
+							channels: subscribe
+								? [...new Set([...target.channels, name])]
+								: target.channels.filter(value => value !== name),
+							subscribedSince,
+						});
+						subscribers = subscribe
+							? [...new Set([...subscribers, target.name])]
+							: subscribers.filter(value => value !== target.name);
+					}
+					board.setChannel(name, { ...channel, subscribers });
 				}
 			}
 			this.notify({ type: "channels", swarmId: actor.id });
@@ -649,8 +660,15 @@ export class SwarmRuntime implements SwarmApi {
 			const target = name ?? actor.name;
 			const member = board.member(target);
 			if (member.killed) throw new SwarmRefusal(`Member ${target} is killed`);
-			if (this.#memberState(member, actor.id) === "working")
+			const own = target === actor.name;
+			if (actor.name !== "coordinator" && !own && member.owner !== actor.name)
+				throw new SwarmRefusal(
+					`A member switches its own model and its helpers' models; ask the coordinator to switch ${target}`,
+				);
+			// The caller's own turn is the one running; its next request uses the new model.
+			if (!own && this.#memberState(member, actor.id) === "working")
 				throw new SwarmRefusal(`Member ${target} is working; wait until it parks before changing model`);
+			const resume = !own && member.error === "quota" && !this.#waiters.has(`${actor.id}:${member.agentId}`);
 			const identity = formatModelStringWithRouting(model);
 			if (this.lifecycle.isParking(member.agentId)) await this.lifecycle.park(member.agentId);
 			const ref = this.registry.get(member.agentId);
@@ -681,8 +699,44 @@ export class SwarmRuntime implements SwarmApi {
 			});
 			this.#quota.delete(member.agentId);
 			this.notify({ type: "members", swarmId: actor.id });
+			if (resume) void this.#resumeAfterQuota(actor.id, target, member.agentId);
 			return this.snapshot(actor.id);
 		});
+	}
+
+	/** A member whose turn failed on quota picks that turn up again on its newly selected model. */
+	async #resumeAfterQuota(id: string, name: string, agentId: string): Promise<void> {
+		try {
+			if (this.#disposed || this.#closing.has(agentId)) return;
+			const session = await this.lifecycle.ensureLive(agentId);
+			if (this.#disposed || this.#closing.has(agentId) || this.board(id).member(name).killed) return;
+			if (session.isStreaming) return;
+			if (!(await session.retry()))
+				logger.debug("Swarm member had no failed turn to resume after its model switch", { agentId });
+		} catch (error) {
+			logger.warn("Swarm member did not resume after its model switch", { agentId, error: String(error) });
+		}
+	}
+
+	/**
+	 * Members `actor` may manage by member or group name: the coordinator any of them, every other member the
+	 * helpers it added and, when `self` allows, itself.
+	 */
+	#managedTargets(
+		board: BoardStore,
+		actor: SwarmActor,
+		name: string,
+		self: boolean,
+	): Array<SwarmMember & { name: string }> {
+		const targets = board.listMembers().filter(member => member.name === name || member.group === name);
+		if (!targets.length) throw new SwarmRefusal(`Unknown swarm member or group: ${name}`);
+		if (actor.name === "coordinator") return targets;
+		const foreign = targets.find(member => member.owner !== actor.name && !(self && member.name === actor.name));
+		if (foreign)
+			throw new SwarmRefusal(
+				`${foreign.name} belongs to ${foreign.owner ?? "the coordinator"}; a member manages ${self ? "itself and " : ""}the helpers it added`,
+			);
+		return targets;
 	}
 
 	create(dir: string, options: CreateBoardOptions): BoardStore {
@@ -738,8 +792,6 @@ export class SwarmRuntime implements SwarmApi {
 					let error: string | undefined;
 					if (member.killed || this.#closing.has(member.agentId))
 						error = `Member ${member.name} is killed or closing`;
-					else if (member.error === "quota")
-						error = `Member ${member.name} reached quota; select its next model explicitly`;
 					else if (ref?.sessionFile && member.sessionFile && ref.sessionFile !== member.sessionFile)
 						error = `Member ${member.name}'s conversation is not active in the native registry`;
 					if (error) return { name: member.name, to: member.agentId, outcome: "failed", error };
@@ -931,6 +983,7 @@ export class SwarmRuntime implements SwarmApi {
 			);
 		}
 		const result = Promise.withResolvers<SwarmWaitResult>();
+		let releaseParentHold: (() => void) | undefined;
 		const onAbort = () =>
 			waiter.settle({
 				interrupted: true,
@@ -946,6 +999,7 @@ export class SwarmRuntime implements SwarmApi {
 				if (this.#waiters.get(key) !== waiter)
 					return { name: actor.name, to: actor.agentId, outcome: "failed", error: "Wait already settled" };
 				this.#waiters.delete(key);
+				releaseParentHold?.();
 				signal?.removeEventListener("abort", onAbort);
 				try {
 					result.resolve(this.#finishWait(board, actor.name, options.since, settlement));
@@ -959,6 +1013,10 @@ export class SwarmRuntime implements SwarmApi {
 		};
 		board.updateMember(actor.name, { wakeMode: mentionsOnly ? "mentions" : "any", waitSince: options.since });
 		this.#waiters.set(key, waiter);
+		// A parked member messages its parent only after a post wakes it, so the parent's run must not stay open
+		// for it: the interruptible hold excludes it from the parent's wake sources until the wait settles.
+		const parentId = this.registry.get(actor.agentId)?.parentId;
+		if (parentId) releaseParentHold = this.registry.awaits.hold(actor.agentId, [parentId], { interruptible: true });
 		signal?.addEventListener("abort", onAbort, { once: true });
 		if (signal?.aborted) onAbort();
 		else this.notify({ type: "members", swarmId: actor.id });

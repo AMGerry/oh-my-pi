@@ -7,6 +7,7 @@ import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgSwarmEnabled } from "../swarm/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 
@@ -1228,6 +1229,7 @@ export const cfgBuiltinToolGates = combine({
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
 	security: cfgSecurityEnabled,
+	swarm: cfgSwarmEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,
 	webSearch: cfgWebSearchEnabled,

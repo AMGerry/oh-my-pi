@@ -25,5 +25,6 @@ export async function getSwarmCaller(session: ToolSession): Promise<SwarmCaller>
 		cwd: session.cwd,
 		context: getSwarmMemberContext(session.sessionManager?.getEntries() ?? []),
 		maxMembers: cfgSwarmMaxMembers.get(session.settings),
+		agentDir: session.agentDir ?? session.settings.getAgentDir(),
 	};
 }

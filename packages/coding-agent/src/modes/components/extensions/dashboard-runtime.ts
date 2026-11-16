@@ -37,7 +37,7 @@ export function createExtensionDashboardRuntime(options: {
 				userSourceEnabled: isUserSourceEnabled(provider.id),
 				foreignUserSource: isForeignUserProvider(provider.id),
 			})),
-		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.()),
+		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.(), settings),
 		toggleProvider,
 		toggleUserSource,
 		async persistMcpToggle(name, enabled, sourcePath) {

@@ -323,7 +323,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 
 	// User-level scan from ~/.omp/agent/skills/
 	const userScan = scanSkillsFromDir(ctx, {
-		dir: path.join(getAgentDir(), "skills"),
+		dir: path.join(ctx.agentDir ?? getAgentDir(), "skills"),
 		providerId: PROVIDER_ID,
 		level: "user",
 		requireDescription: true,
@@ -343,7 +343,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 const MANAGED_SKILLS_PRIORITY = 5;
 async function loadManagedSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	return scanSkillsFromDir(ctx, {
-		dir: getManagedSkillsDir(),
+		dir: getManagedSkillsDir(ctx.agentDir),
 		providerId: MANAGED_SKILLS_PROVIDER_ID,
 		level: "user",
 		requireDescription: true,

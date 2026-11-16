@@ -238,6 +238,8 @@ export interface FileChangeReport {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Profile directory for resource discovery and member briefs. */
+	agentDir?: string;
 	/** Cost gate of the session tree, forwarded to subagents. */
 	costGate?: CostGateApi;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */

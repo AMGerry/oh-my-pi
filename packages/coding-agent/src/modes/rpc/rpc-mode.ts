@@ -274,7 +274,7 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	const parsed = parseSkillInvocation(text);
 	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return null;
+	if (!skill || skill.disableSlashCommand) return null;
 	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
 }
 

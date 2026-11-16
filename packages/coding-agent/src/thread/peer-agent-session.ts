@@ -226,6 +226,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return mainBridge().remote.call("setModelTemporary", this, model, thinkingLevel, options);
 	}
 
+	retry(): Promise<boolean> {
+		return mainBridge().remote.call("retry", this);
+	}
+
 	abort(options?: SessionAbortOptions): Promise<void> {
 		return mainBridge().remote.call("abort", this, options);
 	}

@@ -3133,6 +3133,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.skillsSettings?.enableSkillCommands !== false) {
 			const icon = getSlashCommandTypeIcon("skill");
 			for (const skill of this.session.skills) {
+				if (skill.disableSlashCommand) continue;
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
 				skillCommandList.push({

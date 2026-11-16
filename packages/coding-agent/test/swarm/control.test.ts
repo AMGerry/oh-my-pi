@@ -192,6 +192,79 @@ describe("swarm control", () => {
 		expect(() => f.runtime.append(f.actor.id, "alice", "new", "ui")).toThrow("unavailable");
 	});
 
+	it("moves, kills and switches only the members an actor manages, and gives a worker's helper its channels", async () => {
+		const f = await fixture();
+		const board = f.runtime.board(f.actor.id);
+		await f.runtime.channel(f.actor, { action: "channel", op: "create", channel: "code" });
+		await f.runtime.channel(f.actor, { action: "channel", op: "create", channel: "ui" });
+		await f.runtime.add(f.caller, { action: "add", name: "alice", brief: "Code" }, f.prepare);
+		await f.runtime.add(f.caller, { action: "add", name: "bob", brief: "Review" }, f.prepare);
+		expect(controlSchema.allows({ action: "channel", op: "subscribe", channel: "code", name: "alice" })).toBe(true);
+
+		// The coordinator moves any member by name.
+		await f.runtime.channel(f.actor, { action: "channel", op: "subscribe", channel: "code", name: "alice" });
+		await f.runtime.channel(f.actor, { action: "channel", op: "subscribe", channel: "ui", name: "alice" });
+		await f.runtime.channel(f.actor, { action: "channel", op: "archive", channel: "ui" });
+		expect(board.member("alice").channels).toEqual(["code", "ui"]);
+		expect(board.member("coordinator").channels).toEqual([]);
+
+		// A worker's helper joins the worker's active channels and takes its brief there.
+		const alice = board.member("alice");
+		const aliceActor = { id: f.actor.id, name: "alice", agentId: alice.agentId };
+		const aliceCaller: SwarmCaller = {
+			...f.caller,
+			agentId: alice.agentId,
+			sessionFile: alice.sessionFile!,
+			context: { kind: "swarm", id: f.actor.id, dir: board.dir, name: "alice", agentId: alice.agentId },
+			agentDir: path.join(f.cwd, "profile"),
+		};
+		await f.runtime.add(aliceCaller, { action: "add", name: "helper", brief: "Check the lexer" }, f.prepare);
+		expect(board.member("helper")).toMatchObject({ owner: "alice", channels: ["code"] });
+		expect(board.posts().at(-1)).toMatchObject({ agent: "alice", channel: "code", text: "@helper Check the lexer" });
+		expect(board.channels().get("code")?.subscribers).toEqual(["alice", "helper"]);
+		// The helper's brief is the <swarm_worker> block the skills name, with its adder's profile directory.
+		expect(f.briefs.at(-1)).toContain("<swarm_worker>");
+		expect(f.briefs.at(-1)).toContain("</swarm_worker>");
+		expect(f.briefs.at(-1)).toContain(path.join(f.cwd, "profile"));
+		expect(f.briefs.at(-1)).toContain("Channels: code");
+
+		// A worker moves itself and its helpers, never another member.
+		await f.runtime.channel(aliceActor, { action: "channel", op: "unsubscribe", channel: "code", name: "helper" });
+		expect(board.member("helper").channels).toEqual([]);
+		expect(board.channels().get("code")?.subscribers).toEqual(["alice"]);
+		await expect(
+			f.runtime.channel(aliceActor, { action: "channel", op: "subscribe", channel: "code", name: "bob" }),
+		).rejects.toThrow("belongs to coordinator");
+		expect(board.member("bob").channels).toEqual([]);
+
+		// A worker kills only the helpers it added.
+		await expect(f.runtime.kill(aliceActor, "bob")).rejects.toThrow("belongs to coordinator");
+		await expect(f.runtime.kill(aliceActor, "alice")).rejects.toThrow("belongs to coordinator");
+		expect((await f.runtime.kill(aliceActor, "helper")).killed).toEqual(["helper"]);
+
+		// A worker switches its own model during its turn, never another member's.
+		const model = createMockModel({ id: "replacement" });
+		await expect(f.runtime.switchModel(aliceActor, "bob", model)).rejects.toThrow("ask the coordinator");
+		const journal = await SessionManager.open(alice.sessionFile!, undefined, undefined, {
+			initialCwd: f.cwd,
+			suppressBreadcrumb: true,
+		});
+		journal.appendCustomEntry("swarm.member", {
+			kind: "swarm",
+			id: f.actor.id,
+			name: "alice",
+			agentId: alice.agentId,
+			dir: board.dir,
+		});
+		journal.appendMessage({ role: "user", content: "Code", timestamp: Date.now() });
+		await journal.flush();
+		await journal.close();
+		expect(f.runtime.snapshot(f.actor.id).members.find(member => member.name === "alice")?.state).toBe("working");
+		await f.runtime.switchModel(aliceActor, undefined, model);
+		expect(board.member("alice").model).toBe("mock/replacement");
+		await expect(f.runtime.switchModel(f.actor, "bob", model)).rejects.toThrow("working");
+	});
+
 	it("rejects reserved names, ambiguous groups, unknown channels and mismatched identity", async () => {
 		const f = await fixture();
 		for (const name of ["all", "coordinator", "Bad", "a".repeat(41)])

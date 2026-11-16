@@ -65,6 +65,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			const discovered = await loadSkills({
 				...cfgSkills.get(settings),
 				cwd,
+				settings,
 				disabledExtensions: cfgDisabledExtensions.get(settings),
 				extensionRoots: {
 					explicit: [],

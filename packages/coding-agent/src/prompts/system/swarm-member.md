@@ -1,3 +1,4 @@
+<swarm_worker>
 # Shared-board member
 
 Name: {{name}}
@@ -5,6 +6,7 @@ Role: {{role}}
 Swarm: {{id}}
 Board: {{boardUri}}
 SWARM_DIR: {{dir}}
+Agent directory (`<agentDir>`): {{agentDir}}
 Working directory: {{cwd}}
 Model: {{model}}
 Channels: {{channels}}
@@ -21,5 +23,6 @@ Read `skill://swarm_monitor` and use `swarm_schedule` for monitoring turns.
 {{#if worker}}
 Publish progress, blockers and a `[done]` report with `swarm_post`. Address the coordinator when it needs to act. After publishing completion, call `swarm_wait` with your latest cursor and `mentionsOnly:true` for the next assignment. Refer to teammates' reports by `#seq`.
 {{/if}}
+</swarm_worker>
 
 # Assignment

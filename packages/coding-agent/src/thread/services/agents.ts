@@ -238,6 +238,7 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
 		steer: (_bridge, session, text, images, options) => session.steer(text, images, options),
 		setModelTemporary: (_bridge, session, model, thinkingLevel, options) =>
 			session.setModelTemporary(model, thinkingLevel, options),
+		retry: (_bridge, session) => session.retry(),
 		abort: (_bridge, session, options) => session.abort(options),
 		dispose: (_bridge, session, options) => session.dispose(options),
 		deliverIrcMessage: (_bridge, session, msg) => session.deliverIrcMessage(msg),
