@@ -1,8 +1,17 @@
 import { type } from "@oh-my-pi/omptype";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/irc";
 import type { PreparedSwarmMember, SwarmLaunchPlan, SwarmMemberContext } from "./context";
-import { memberNameSchema, type SwarmChannel, type SwarmSnapshot } from "./types";
+import {
+	memberNameSchema,
+	sequenceSchema,
+	type BoardPost,
+	type BoardReadOptions,
+	type BoardReadResult,
+	type SwarmChannel,
+	type SwarmSnapshot,
+} from "./types";
 
 export const addSchema = type({
 	action: "'add'",
@@ -35,6 +44,52 @@ export type AddMemberRequest = typeof addSchema.infer;
 export type ChannelRequest = typeof channelActionSchema.infer;
 export type ControlParams = typeof controlSchema.infer;
 
+export const postSchema = type({
+	text: "string > 0",
+	"channel?": memberNameSchema,
+	"+": "reject",
+});
+export const readSchema = type({
+	"since?": sequenceSchema,
+	"limit?": "1 <= number.integer <= 2000",
+	"channel?": memberNameSchema.or("'*'"),
+	"status?": "boolean",
+	"+": "reject",
+});
+export const waitSchema = type({
+	since: sequenceSchema,
+	"mentionsOnly?": "boolean",
+	"+": "reject",
+});
+export type PostParams = typeof postSchema.infer;
+export type ReadParams = typeof readSchema.infer;
+export type WaitParams = typeof waitSchema.infer;
+
+/** A disconnected caller leaves pending messages available to its next persisted turn. */
+export const SWARM_WAIT_DISCONNECTED = Symbol("swarm wait disconnected");
+
+export type SwarmDeliveryReceipt = IrcDeliveryReceipt & { name: string };
+export interface SwarmPostResult {
+	post: BoardPost;
+	receipts: SwarmDeliveryReceipt[];
+	head: number;
+	lastReadSeq: number;
+	boardUri: string;
+}
+export interface SwarmReadResult extends BoardReadResult {
+	boardUri: string;
+}
+export interface SwarmWaitResult extends SwarmReadResult {
+	interrupted?: true;
+}
+export interface SwarmWaitSnapshot {
+	swarmId: string;
+	agentId: string;
+	name: string;
+	since: number;
+	mentionsOnly: boolean;
+}
+
 /** Session-owned identity, constructed by tools rather than supplied in tool arguments. */
 export interface SwarmCaller {
 	agentId: string;
@@ -65,6 +120,9 @@ export type PrepareSwarmMember = (plan: SwarmLaunchPlan) => Promise<PreparedSwar
 export interface SwarmApi {
 	ensure(caller: SwarmCaller): Promise<SwarmActor>;
 	status(actor: SwarmActor): Promise<SwarmControlResult>;
+	post(actor: SwarmActor, text: string, channel?: string): Promise<SwarmPostResult>;
+	read(actor: SwarmActor, options?: BoardReadOptions): Promise<SwarmReadResult>;
+	wait(actor: SwarmActor, options: WaitParams, signal?: AbortSignal): Promise<SwarmWaitResult>;
 	add(
 		caller: SwarmCaller,
 		request: AddMemberRequest,

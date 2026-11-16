@@ -3348,10 +3348,12 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		// back would ping-pong two idle peers forever. A broadcast leg is not one
 		// either: it asks no one in particular, so relaying every woken peer's
 		// turn back would flood the broadcaster with "not for me" replies.
-		// A progress note promises a later answer and asks nothing back.
+		// A progress note promises a later answer and asks nothing back. A board
+		// notice is answered on the swarm board, never by copying the turn back.
 		if (
 			details &&
 			(Reflect.get(details, "wakeRelay") === true ||
+				Reflect.get(details, "boardNotice") !== undefined ||
 				Reflect.get(details, "broadcast") === true ||
 				Reflect.get(details, "progress") === true)
 		)

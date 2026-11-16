@@ -8,6 +8,7 @@ import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AuthStorage } from "../../src/session/auth-storage";
@@ -15,6 +16,7 @@ import { SessionManager } from "../../src/session/session-manager";
 import { SwarmRuntime } from "../../src/swarm/runtime";
 import { getSwarmMemberContext } from "../../src/swarm/context";
 import { SwarmTool } from "../../src/swarm/tools/swarm";
+import { SwarmPostTool } from "../../src/swarm/tools/swarm-post";
 import { cfgSwarmEnabled, cfgSwarmMaxMembers } from "../../src/swarm/settings";
 import { getBundledAgent } from "../../src/task/agents";
 import * as discovery from "../../src/task/discovery";
@@ -31,12 +33,14 @@ afterEach(async () => {
 	SwarmRuntime.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 });
 
 async function fixture() {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	SwarmRuntime.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-swarm-native-"));
 	const sourceId = `swarm-native-${++nextFixture}`;
 	const started = Promise.withResolvers<void>();
@@ -72,7 +76,7 @@ async function fixture() {
 			find(provider, id),
 	);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
-		agents: [{ ...getBundledAgent("swarm")!, tools: ["read", "swarm"] }],
+		agents: [{ ...getBundledAgent("swarm")!, tools: ["read", "swarm", "swarm_post", "swarm_read", "swarm_wait"] }],
 		projectAgentsDir: null,
 	});
 	const settings = Settings.isolated({
@@ -161,6 +165,21 @@ async function fixture() {
 	};
 }
 
+function untilRuntime(runtime: SwarmRuntime, condition: () => boolean): Promise<void> {
+	const done = Promise.withResolvers<void>();
+	const stop = runtime.onChange(() => {
+		if (condition()) {
+			stop();
+			done.resolve();
+		}
+	});
+	if (condition()) {
+		stop();
+		done.resolve();
+	}
+	return done.promise;
+}
+
 describe("native swarm control tool", () => {
 	it("M2 gate: TaskTool add creates a working native session, kill tombstones it, and the name stays reserved", async () => {
 		const f = await fixture();
@@ -194,6 +213,141 @@ describe("native swarm control tool", () => {
 		const repeat = await f.tool.execute("again", { action: "add", name: "author", brief: "Again" });
 		expect(repeat.isError).toBe(true);
 		expect(repeat.details?.error).toContain("already been used");
+	});
+
+	it("parks two native TaskTool conversations inside swarm_wait and resumes only the addressed member with its selected model", async () => {
+		const f = await fixture();
+		for (let index = 0; index < 2; index++)
+			f.model.push({ content: [{ type: "toolCall", name: "swarm_wait", arguments: { since: 2 } }] });
+		const bothWaiting = untilRuntime(f.runtime, () => f.runtime.waiters().length === 2);
+		const added = await f.tool.execute("writers", {
+			action: "add",
+			name: "writers",
+			n: 2,
+			brief: "Complete your own assignment, then park",
+		});
+		expect(added.isError).not.toBe(true);
+		await bothWaiting;
+		expect(f.model.calls).toHaveLength(2);
+		const result = added.details!.result!;
+		const board = f.runtime.board(result.id);
+		const post = new SwarmPostTool(f.session);
+		const quiet = await post.execute("quiet", { text: "An unaddressed observation" });
+		expect(quiet.details?.result?.receipts).toEqual([]);
+		expect(
+			f.runtime
+				.waiters()
+				.map(waiter => waiter.name)
+				.sort(),
+		).toEqual(["writers-1", "writers-2"]);
+		expect(f.model.calls).toHaveLength(2);
+		const switched = await f.tool.execute("switch-waiter", {
+			action: "model",
+			name: "writers-2",
+			model: "mock/swarm-replacement",
+		});
+		expect(switched.isError).not.toBe(true);
+		expect(f.runtime.waiters()).toHaveLength(2);
+		const resumed = Promise.withResolvers<string>();
+		f.replacement.push(context => {
+			resumed.resolve(JSON.stringify(context.messages));
+			return { content: ["The addressed member completed its next step"] };
+		});
+		const started = Bun.nanoseconds();
+		const wake = await post.execute("wake", { text: "@writers-2 act on this new instruction" });
+		expect(wake.details?.result?.receipts).toMatchObject([{ name: "writers-2", outcome: "woken" }]);
+		const context = await resumed.promise;
+		expect((Bun.nanoseconds() - started) / 1e6).toBeLessThan(1000);
+		expect(context).toContain("act on this new instruction");
+		expect(context).toContain("An unaddressed observation");
+		expect(f.model.calls).toHaveLength(2);
+		expect(f.replacement.calls).toHaveLength(1);
+		expect(board.member("writers-1").lastReadSeq).toBe(2);
+		expect(board.member("writers-2").lastReadSeq).toBe(4);
+		expect(f.runtime.waiters().map(waiter => waiter.name)).toEqual(["writers-1"]);
+		await untilRuntime(f.runtime, () => f.registry.get(board.member("writers-2").agentId)?.status === "parked");
+		expect(board.member("writers-2").model).toBe("mock/swarm-replacement");
+		await f.tool.execute("finish", { action: "kill", name: "writers" });
+		expect(f.runtime.waiters()).toEqual([]);
+	});
+
+	it("revives through IrcBus with the saved cursor, keeps reports on the board, and preserves a quota conversation for an explicit switch", async () => {
+		const f = await fixture();
+		f.model.push({ content: ["Initial native turn completed"] });
+		const added = await f.tool.execute("revivable", {
+			action: "add",
+			name: "revivable",
+			brief: "Preserve this exact assignment across turns",
+		});
+		expect(added.isError).not.toBe(true);
+		const snapshot = added.details!.result!;
+		const member = snapshot.members.find(candidate => candidate.name === "revivable")!;
+		const actor = { id: snapshot.id, name: member.name, agentId: member.agentId };
+		const coordinator = await f.runtime.ensure({
+			agentId: "Main",
+			cwd: f.cwd,
+			sessionFile: f.journal.getSessionFile()!,
+			artifactsDir: f.journal.getArtifactsDir()!,
+			model: "mock/swarm-test",
+			maxMembers: 32,
+		});
+		await untilRuntime(f.runtime, () => f.registry.get(member.agentId)?.status === "parked");
+		await f.runtime.post(coordinator, "Earlier visible progress");
+		await f.runtime.read(actor, { since: 1, limit: 1 });
+		await f.runtime.post(coordinator, "Retained unread progress");
+		const firstWake = Promise.withResolvers<string>();
+		f.model.push(context => {
+			firstWake.resolve(JSON.stringify(context.messages));
+			return { content: [{ type: "toolCall", name: "swarm_read", arguments: { since: 2 } }] };
+		});
+		f.model.push({ content: ["Unique native wake completion stays in its own conversation"] });
+		const send = vi.spyOn(IrcBus.global(), "send");
+		const delivery = await f.runtime.post(coordinator, "@revivable continue from the saved cursor");
+		expect(delivery.receipts).toMatchObject([{ name: "revivable", outcome: "revived" }]);
+		const wakeContext = await firstWake.promise;
+		expect(wakeContext).toContain("board moved: #4; swarm_read{since:2}");
+		expect(wakeContext).toContain("Preserve this exact assignment across turns");
+		expect(wakeContext).not.toContain("continue from the saved cursor");
+		await untilRuntime(f.runtime, () => f.registry.get(member.agentId)?.status === "parked");
+		expect(f.registry.get(member.agentId)?.session).toBeNull();
+		expect(f.runtime.board(snapshot.id).member(member.name).lastReadSeq).toBe(4);
+		expect(send).toHaveBeenCalledTimes(1);
+		expect(JSON.stringify(f.root.messages)).not.toContain("Unique native wake completion");
+		f.model.push({ stopReason: "error", errorMessage: "RESOURCE_EXHAUSTED quota", content: [] });
+		await f.runtime.post(coordinator, "@revivable inspect the next part");
+		await untilRuntime(
+			f.runtime,
+			() =>
+				f.registry.get(member.agentId)?.status === "parked" &&
+				f.runtime.board(snapshot.id).member(member.name).error === "quota",
+		);
+		expect(f.runtime.snapshot(snapshot.id).members.find(candidate => candidate.name === member.name)).toMatchObject({
+			state: "waiting",
+			error: "quota",
+		});
+		expect(f.model.calls).toHaveLength(4);
+		const blocked = await f.runtime.post(coordinator, "@revivable try again");
+		expect(blocked.receipts).toMatchObject([
+			{ name: member.name, outcome: "failed", error: expect.stringContaining("quota") },
+		]);
+		expect(f.model.calls).toHaveLength(4);
+		const switched = await f.tool.execute("switch-after-quota", {
+			action: "model",
+			name: member.name,
+			model: "mock/swarm-replacement",
+		});
+		expect(switched.isError).not.toBe(true);
+		const resumed = await f.runtime.post(coordinator, "@revivable continue with the selected model");
+		expect(resumed.receipts).toMatchObject([{ name: member.name, outcome: "revived" }]);
+		await untilRuntime(f.runtime, () => f.registry.get(member.agentId)?.status === "parked");
+		expect(f.replacement.calls).toHaveLength(1);
+		expect(JSON.stringify(f.replacement.calls[0]?.context.messages)).toContain(
+			"Preserve this exact assignment across turns",
+		);
+		expect(f.runtime.board(snapshot.id).member(member.name)).toMatchObject({
+			model: "mock/swarm-replacement",
+			lastReadSeq: 4,
+		});
 	});
 
 	it("gives a helper the live coordinator model across a different parent model and cold revival", async () => {

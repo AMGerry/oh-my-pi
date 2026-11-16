@@ -109,6 +109,9 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 import { cfgSwarmEnabled } from "../swarm/settings";
 import { SwarmTool } from "../swarm/tools/swarm";
+import { SwarmPostTool } from "../swarm/tools/swarm-post";
+import { SwarmReadTool } from "../swarm/tools/swarm-read";
+import { SwarmWaitTool } from "../swarm/tools/swarm-wait";
 
 export * from "../edit";
 export * from "../goals";
@@ -116,6 +119,9 @@ export * from "../lsp";
 export * from "@oh-my-pi/pi-tui/tools/streaming-output";
 export * from "../task";
 export * from "../swarm/tools/swarm";
+export * from "../swarm/tools/swarm-post";
+export * from "../swarm/tools/swarm-read";
+export * from "../swarm/tools/swarm-wait";
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
@@ -634,6 +640,9 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	task: s => TaskTool.create(s),
 	wait: s => new WaitTool(s),
 	swarm: s => new SwarmTool(s),
+	swarm_post: s => new SwarmPostTool(s),
+	swarm_read: s => new SwarmReadTool(s),
+	swarm_wait: s => new SwarmWaitTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
@@ -671,6 +680,15 @@ export interface BuiltinToolPlan {
 	/** Session restriction plus settings gate shared by construction and live reconcile. */
 	isAllowed(name: string): boolean;
 }
+
+/** Tools that follow `swarm.enabled` together. */
+const SWARM_TOOL_NAMES: Record<string, true> = {
+	swarm: true,
+	swarm_post: true,
+	swarm_read: true,
+	swarm_wait: true,
+	swarm_schedule: true,
+};
 
 /**
  * Resolve which built-in tools `session` gets for `toolNames` under the current
@@ -801,7 +819,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
-		if (name === "swarm") return cfgSwarmEnabled.get(session.settings);
+		if (SWARM_TOOL_NAMES[name] === true) return cfgSwarmEnabled.get(session.settings);
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
 		// Without an edit tool, bash is the remaining way to modify existing files.
 		if (name === "edit") return !editDisabled;

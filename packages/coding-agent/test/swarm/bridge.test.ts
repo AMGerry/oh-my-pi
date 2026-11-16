@@ -30,7 +30,7 @@ afterEach(async () => {
 	IrcBus.resetGlobalForTests();
 });
 
-async function worker(): Promise<SwarmProbe> {
+async function worker(onCreated?: (worker: SubagentWorker) => void): Promise<SwarmProbe> {
 	const probe = Promise.withResolvers<SwarmProbe>();
 	const service: ThreadService = {
 		name: "swarm-probe",
@@ -41,12 +41,13 @@ async function worker(): Promise<SwarmProbe> {
 		services: [identityThreadService, agentsThreadService, swarmThreadService, service],
 		initTimeoutMs: 20000,
 	});
+	onCreated?.(spawned);
 	cleanups.push(() => spawned.terminate("swarm test complete"));
 	await spawned.ready;
 	return probe.promise;
 }
 
-it("serializes control calls from two real worker threads and retains completion callbacks", async () => {
+function boardFixture() {
 	SwarmRuntime.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
@@ -76,6 +77,11 @@ it("serializes control calls from two real worker threads and retains completion
 		await lifecycle.dispose();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	});
+	return { cwd, registry, lifecycle, runtime, caller };
+}
+
+it("serializes control calls from two real worker threads and retains completion callbacks", async () => {
+	const { registry, runtime, caller } = boardFixture();
 	const [left, right] = await Promise.all([worker(), worker()]);
 	expect(await left.writerGuard()).toBe(true);
 	const results = await Promise.all([
@@ -121,4 +127,61 @@ it("routes a waiting peer's explicit model change through the native session bri
 	const probe = await worker();
 	expect(await probe.switchPeerModel("Main", to)).toBe(to.id);
 	expect(session.model?.id).toBe(to.id);
+});
+
+it("passes a real wait, board delivery, read and an already-aborted signal through worker RPC", async () => {
+	const { runtime, caller } = boardFixture();
+	const [left, right] = await Promise.all([worker(), worker()]);
+	const added = await left.add(caller, { action: "add", name: "waiting", brief: "Wait for the board" });
+	const member = added.members.find(candidate => candidate.name === "waiting")!;
+	const actor = { id: added.id, name: member.name, agentId: member.agentId };
+	const coordinator = await runtime.ensure(caller);
+	const entered = Promise.withResolvers<void>();
+	const stop = runtime.onChange(() => {
+		if (runtime.waiters(added.id).some(waiter => waiter.agentId === member.agentId)) entered.resolve();
+	});
+	const waiting = left.wait(actor, { since: added.head });
+	await entered.promise;
+	stop();
+	await right.post(coordinator, "Public progress for @unknown");
+	expect(runtime.waiters(added.id).map(waiter => waiter.name)).toEqual(["waiting"]);
+	const wake = await right.post(coordinator, "@waiting continue");
+	expect(wake.receipts).toEqual([{ name: "waiting", to: member.agentId, outcome: "woken" }]);
+	expect((await waiting).messages.map(post => post.seq)).toEqual([2, 3]);
+	expect(runtime.waiters(added.id)).toEqual([]);
+	expect((await right.read(actor)).messages).toEqual([]);
+	await right.post(coordinator, "Pending data for a later read");
+	const aborted = new AbortController();
+	aborted.abort("tool interrupted");
+	const result = await left.wait(actor, { since: 3 }, aborted.signal);
+	expect(result).toMatchObject({ interrupted: true, lastReadSeq: 4 });
+	expect(result.messages.map(post => post.seq)).toEqual([4]);
+});
+
+it("clears a disconnected worker's real waiter while preserving its unread cursor", async () => {
+	const { runtime, caller } = boardFixture();
+	let spawned: SubagentWorker | undefined;
+	const probe = await worker(value => {
+		spawned = value;
+	});
+	const added = await probe.add(caller, { action: "add", name: "disconnected", brief: "Keep this conversation" });
+	const member = added.members.find(candidate => candidate.name === "disconnected")!;
+	const actor = { id: added.id, name: member.name, agentId: member.agentId };
+	const entered = Promise.withResolvers<void>();
+	const stop = runtime.onChange(() => {
+		if (runtime.waiters(added.id).some(waiter => waiter.agentId === member.agentId)) entered.resolve();
+	});
+	const waiting = probe.wait(actor, { since: added.head });
+	const disconnected = waiting.catch((error: unknown) => error);
+	await entered.promise;
+	stop();
+	await runtime.post(await runtime.ensure(caller), "An unread update before the worker exits");
+	await spawned!.terminate("simulate a disconnected swarm worker");
+	expect(await disconnected).toMatchObject({ name: "RpcClosedError" });
+	expect(runtime.waiters(added.id)).toEqual([]);
+	expect(runtime.board(added.id).member(member.name)).toMatchObject({
+		lastReadSeq: added.head,
+		wakeMode: null,
+		waitSince: null,
+	});
 });

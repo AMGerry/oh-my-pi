@@ -318,6 +318,15 @@ export class BoardStore {
 		);
 	}
 
+	/** Test the wake condition across the visible backlog while reads remain paged. */
+	hasPending(name: string, since: number, mentionsOnly: boolean): boolean {
+		this.member(name);
+		if (!Number.isSafeInteger(since) || since < 0) throw new SwarmRefusal("since must be a nonnegative safe integer");
+		return this.#posts.some(
+			post => post.seq > since && this.visible(post, name) && (!mentionsOnly || this.addresses(post, name)),
+		);
+	}
+
 	read(name: string, options: BoardReadOptions = {}): BoardReadResult {
 		const messages = this.select(name, options);
 		const prior = this.member(name).lastReadSeq;

@@ -8,10 +8,15 @@ import type {
 	SwarmApi,
 	SwarmCaller,
 	SwarmControlResult,
+	SwarmPostResult,
+	SwarmReadResult,
+	SwarmWaitResult,
+	WaitParams,
 } from "../../swarm/api";
+import { SWARM_WAIT_DISCONNECTED } from "../../swarm/api";
 import { SwarmRuntime } from "../../swarm/runtime";
-import { SwarmRefusal } from "../../swarm/types";
-import { registerRpcError, type RemoteObject, type RpcMethod, type RpcServe } from "../rpc";
+import { SwarmRefusal, type BoardReadOptions } from "../../swarm/types";
+import { registerRpcError, RpcClosedError, type RemoteObject, type RpcMethod, type RpcServe } from "../rpc";
 import type { ThreadService } from "../services";
 
 const SWARM_KIND = "swarm-runtime";
@@ -20,6 +25,9 @@ registerRpcError("SwarmRefusal", message => new SwarmRefusal(message));
 export type SwarmProtocol = {
 	ensure: RpcMethod<[caller: SwarmCaller], SwarmActor>;
 	status: RpcMethod<[actor: SwarmActor], SwarmControlResult>;
+	post: RpcMethod<[actor: SwarmActor, text: string, channel?: string], SwarmPostResult>;
+	read: RpcMethod<[actor: SwarmActor, options?: BoardReadOptions], SwarmReadResult>;
+	wait: RpcMethod<[actor: SwarmActor, options: WaitParams, signal: AbortSignal], SwarmWaitResult>;
 	add: RpcMethod<
 		[caller: SwarmCaller, request: AddMemberRequest, prepare: PrepareSwarmMember, signal?: AbortSignal],
 		SwarmControlResult
@@ -36,6 +44,20 @@ export type SwarmProtocol = {
 const serve: RpcServe<SwarmRuntime, SwarmProtocol> = {
 	ensure: (runtime, caller) => runtime.ensure(caller),
 	status: (runtime, actor) => runtime.status(actor),
+	post: (runtime, actor, text, channel) => runtime.post(actor, text, channel),
+	read: (runtime, actor, options) => runtime.read(actor, options),
+	wait: async (runtime, actor, options, signal) => {
+		const controller = new AbortController();
+		const abort = () =>
+			controller.abort(signal.reason instanceof RpcClosedError ? SWARM_WAIT_DISCONNECTED : signal.reason);
+		signal.addEventListener("abort", abort, { once: true });
+		if (signal.aborted) abort();
+		try {
+			return await runtime.wait(actor, options, controller.signal);
+		} finally {
+			signal.removeEventListener("abort", abort);
+		}
+	},
 	add: (runtime, caller, request, prepare, signal) => runtime.add(caller, request, prepare, signal),
 	kill: (runtime, actor, name) => runtime.kill(actor, name),
 	title: (runtime, actor, title) => runtime.title(actor, title),
@@ -50,6 +72,15 @@ export class RemoteSwarmRuntime implements SwarmApi {
 	}
 	status(actor: SwarmActor): Promise<SwarmControlResult> {
 		return this.remote.call("status", actor);
+	}
+	post(actor: SwarmActor, text: string, channel?: string): Promise<SwarmPostResult> {
+		return this.remote.call("post", actor, text, channel);
+	}
+	read(actor: SwarmActor, options?: BoardReadOptions): Promise<SwarmReadResult> {
+		return this.remote.call("read", actor, options);
+	}
+	wait(actor: SwarmActor, options: WaitParams, signal?: AbortSignal): Promise<SwarmWaitResult> {
+		return this.remote.call("wait", actor, options, signal ?? new AbortController().signal);
 	}
 	add(
 		caller: SwarmCaller,

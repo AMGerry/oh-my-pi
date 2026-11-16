@@ -4,7 +4,16 @@ import * as path from "node:path";
 import { MessagePort, parentPort } from "node:worker_threads";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { AgentRegistry } from "../../src/registry/agent-registry";
-import type { AddMemberRequest, SwarmCaller, SwarmControlResult } from "../../src/swarm/api";
+import type {
+	AddMemberRequest,
+	SwarmActor,
+	SwarmCaller,
+	SwarmControlResult,
+	SwarmPostResult,
+	SwarmReadResult,
+	SwarmWaitResult,
+	WaitParams,
+} from "../../src/swarm/api";
 import type { SwarmMemberOutcome } from "../../src/swarm/context";
 import { SwarmRuntime } from "../../src/swarm/runtime";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
@@ -18,6 +27,9 @@ import { swarmThreadService } from "../../src/thread/services/swarm";
 export interface SwarmProbe {
 	add(caller: SwarmCaller, request: AddMemberRequest): Promise<SwarmControlResult>;
 	finish(name: string, outcome: SwarmMemberOutcome): Promise<void>;
+	post(actor: SwarmActor, text: string): Promise<SwarmPostResult>;
+	read(actor: SwarmActor): Promise<SwarmReadResult>;
+	wait(actor: SwarmActor, options: WaitParams, signal?: AbortSignal): Promise<SwarmWaitResult>;
 	switchPeerModel(id: string, model: Model): Promise<string | undefined>;
 	writerGuard(): Promise<boolean>;
 }
@@ -29,6 +41,9 @@ const port = parentPort;
 if (!port) throw new Error("Swarm probe must run in a worker");
 const finishers = new Map<string, (outcome: SwarmMemberOutcome) => void | Promise<void>>();
 const probe: SwarmProbe = {
+	post: (actor, text) => SwarmRuntime.global().post(actor, text),
+	read: actor => SwarmRuntime.global().read(actor),
+	wait: (actor, options, signal) => SwarmRuntime.global().wait(actor, options, signal),
 	add: (caller, request) =>
 		SwarmRuntime.global().add(caller, request, async plan => {
 			const agentId = `Bridge-${plan.name}`;

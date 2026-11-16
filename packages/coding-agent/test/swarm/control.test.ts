@@ -104,10 +104,10 @@ describe("swarm control", () => {
 			"@parse-2 Common\n  indented\n\nright",
 		]);
 		expect(board.member("coordinator").lastReadSeq).toBe(0);
-		const post = f.runtime.post(f.actor.id, "coordinator", "@parse continue");
+		const post = f.runtime.append(f.actor.id, "coordinator", "@parse continue");
 		expect(board.addresses(post, "parse-1")).toBe(true);
 		expect(board.addresses(post, "parse-2")).toBe(true);
-		f.runtime.read(f.actor.id, "parse-1");
+		await f.runtime.read({ ...f.actor, name: "parse-1", agentId: board.member("parse-1").agentId });
 		expect(board.member("parse-2").lastReadSeq).toBe(2);
 	});
 
@@ -177,7 +177,7 @@ describe("swarm control", () => {
 		const alice = { ...f.actor, name: "alice", agentId: board.member("alice").agentId };
 		await expect(f.runtime.title(alice, "Own title")).rejects.toThrow("Only the coordinator");
 		await f.runtime.channel(alice, { action: "channel", op: "unsubscribe", channel: "ui" });
-		f.runtime.post(f.actor.id, "coordinator", "old ui traffic", "ui");
+		f.runtime.append(f.actor.id, "coordinator", "old ui traffic", "ui");
 		await f.runtime.channel(alice, { action: "channel", op: "subscribe", channel: "ui" });
 		expect(board.select("alice")).toEqual([]);
 		expect(board.select("alice", { channel: "ui" })).toHaveLength(1);
@@ -189,7 +189,7 @@ describe("swarm control", () => {
 		expect(board.posts().at(-1)?.channel).toBeUndefined();
 		expect(board.member("main-first").channels).toEqual(["main", "ui"]);
 		await f.runtime.channel(f.actor, { action: "channel", op: "archive", channel: "ui" });
-		expect(() => f.runtime.post(f.actor.id, "alice", "new", "ui")).toThrow("unavailable");
+		expect(() => f.runtime.append(f.actor.id, "alice", "new", "ui")).toThrow("unavailable");
 	});
 
 	it("rejects reserved names, ambiguous groups, unknown channels and mismatched identity", async () => {

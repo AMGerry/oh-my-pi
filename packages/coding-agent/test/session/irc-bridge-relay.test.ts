@@ -56,6 +56,28 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
 	});
+
+	it("points a board notice at the board tools and promises no stop relay", async () => {
+		const { bridge, woken } = makeBridge();
+		const outcome = await bridge.deliver({
+			id: "irc-3",
+			from: "B",
+			to: "A",
+			body: "[swarm] board moved: #4; swarm_read{since:2}",
+			ts: Date.now(),
+			boardNotice: { id: "swarm-1", seq: 4 },
+		});
+
+		expect(outcome).toBe("woken");
+		const record = woken[0]?.[0];
+		if (record?.role !== "custom") throw new Error("Missing board notice wake record");
+		expect(record.details).toMatchObject({ from: "B", boardNotice: { id: "swarm-1", seq: 4 } });
+		expect(record.content).toContain("swarm_read");
+		expect(record.content).toContain("swarm_post");
+		// The woken turn answers on the board; its output is not copied back to the sender.
+		expect(record.content).not.toContain("is delivered to");
+		expect(record.content).not.toContain("agent://B");
+	});
 });
 
 describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
@@ -96,6 +118,57 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
 			{ id: "b1", broadcast: true },
 		]);
+	});
+
+	it("queues a parent's board notice quietly: no parent steer, no wait interruption, kept for the child's own turn", async () => {
+		const { bridge, steered } = makeStreamingChild();
+		await bridge.deliver({
+			id: "n1",
+			from: "Main",
+			to: "Child",
+			body: "[swarm] board moved: #4; swarm_read{since:2}",
+			ts: 1,
+			boardNotice: { id: "swarm-1", seq: 4 },
+		});
+		await bridge.deliver({ id: "d1", from: "Main", to: "Child", body: "you: status", ts: 2 });
+
+		// Only the direct message is a parent request; the notice interrupts nothing.
+		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([true]);
+		expect(bridge.hasInterrupts()).toBe(false);
+		expect(bridge.hasQueuedFrom("Main")).toBe(true);
+		// It belongs to the child's own wake turn, so a stop boundary leaves it queued.
+		expect(bridge.drainPending({ keepPeerMessages: true })).toEqual([]);
+		const queued = bridge.drainPending();
+		expect(queued).toHaveLength(1);
+		const record = queued[0];
+		if (record?.role !== "custom") throw new Error("Missing queued board notice");
+		expect(bridge.isPeerMessage(record)).toBe(true);
+		expect(record.details).toMatchObject({
+			id: "n1",
+			from: "Main",
+			boardNotice: { id: "swarm-1", seq: 4 },
+		});
+		// A doorbell is not a parent request, so context rollover never keeps it as one.
+		expect(record.details).not.toHaveProperty("fromParent");
+	});
+
+	it("tells a streaming child to answer a board notice through the board tools", async () => {
+		const { bridge } = makeStreamingChild();
+		await bridge.deliver({
+			id: "n2",
+			from: "Main",
+			to: "Child",
+			body: "[swarm] board moved: #5; swarm_read{since:4}",
+			ts: 3,
+			boardNotice: { id: "swarm-1", seq: 5 },
+		});
+
+		const record = bridge.drainPending()[0];
+		if (record?.role !== "custom") throw new Error("Missing queued board notice");
+		expect(record.content).toContain("swarm_read");
+		expect(record.content).toContain("swarm_post");
+		expect(record.content).not.toContain("agent://Main");
+		expect(record.content).not.toContain("Active interruptible wait stopped early");
 	});
 
 	it("shows one live IRC card when the parent observation is later consumed as a steer", async () => {

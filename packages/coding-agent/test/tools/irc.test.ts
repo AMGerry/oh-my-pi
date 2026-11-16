@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcBusApi, type IrcWaitFilter } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -491,6 +491,76 @@ describe("IRC", () => {
 			expect(bus.take("0-Main")).toBeUndefined();
 		});
 
+		const parkedFilters: Array<[string, IrcWaitFilter]> = [
+			["directOnly", { directOnly: true }],
+			["directOnly with replies from the sender", { directOnly: true, repliesFrom: ["0-Main"] }],
+		];
+		it.each(parkedFilters)("a %s wait stays parked through a board notice", async (_label, filter) => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+			const waiting = bus.wait("0-Sub", filter, 0);
+			const notice = await bus.send({
+				from: "0-Main",
+				to: "0-Sub",
+				body: "[swarm] board moved: #4; swarm_read{since:2}",
+				boardNotice: { id: "swarm-1", seq: 4 },
+			});
+			// The notice reaches the recipient through ordinary delivery; the parked wait is not consumed.
+			expect(notice.outcome).toBe("injected");
+			expect(sub.delivered.map(msg => msg.boardNotice)).toEqual([{ id: "swarm-1", seq: 4 }]);
+
+			await bus.send({ from: "0-Main", to: "0-Sub", body: "direct question" });
+			expect((await waiting)?.body).toBe("direct question");
+			expect(sub.delivered).toHaveLength(1);
+		});
+
+		it("a wait without directOnly consumes a board notice like any other message", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+			const waiting = bus.wait("0-Sub", {}, 0);
+			await bus.send({
+				from: "0-Main",
+				to: "0-Sub",
+				body: "[swarm] board moved: #4; swarm_read{since:2}",
+				boardNotice: { id: "swarm-1", seq: 4 },
+			});
+			expect((await waiting)?.boardNotice).toEqual({ id: "swarm-1", seq: 4 });
+			expect(sub.delivered).toEqual([]);
+		});
+
+		it("a board notice neither opens a direct question nor answers one", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+			await bus.send({
+				from: "0-Main",
+				to: "0-Sub",
+				body: "[swarm] board moved: #4; swarm_read{since:2}",
+				boardNotice: { id: "swarm-1", seq: 4 },
+			});
+			expect(bus.unansweredSends("0-Main", 0)).toEqual([]);
+			expect(bus.sentSince("0-Main", "0-Sub", 0)).toBe(false);
+
+			await bus.send({ from: "0-Main", to: "0-Sub", body: "question?" });
+			await bus.send({
+				from: "0-Sub",
+				to: "0-Main",
+				body: "[swarm] board moved: #5; swarm_read{since:4}",
+				boardNotice: { id: "swarm-1", seq: 5 },
+			});
+			expect(bus.unansweredSends("0-Main", 0).map(send => send.to)).toEqual(["0-Sub"]);
+			await bus.send({ from: "0-Sub", to: "0-Main", body: "answer" });
+			expect(bus.unansweredSends("0-Main", 0)).toEqual([]);
+		});
+
 		it("mailbox drops the oldest message beyond the 100-message cap", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
@@ -676,6 +746,30 @@ describe("IRC", () => {
 			await peer.settled();
 			expect(sender.delivered).toEqual([]);
 		});
+
+		it("does not relay a turn woken only by a board notice back to its sender", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", status: "idle", session: sender.session });
+			const peer = registerIdleSubagent("0-A");
+			const receipt = await bus.send({
+				from: "0-C",
+				to: "0-A",
+				body: "[swarm] board moved: #4; swarm_read{since:2}",
+				boardNotice: { id: "swarm-1", seq: 4 },
+			});
+			expect(receipt).toEqual({ to: "0-A", outcome: "woken" });
+			await peer.settled();
+			expect(sender.delivered).toEqual([]);
+		});
+
+		it("relays once to a sender whose direct message shares the wake with its board notice", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", status: "idle", session: sender.session });
+			const peer = registerIdleSubagent("0-A");
+			peer.wake([incoming("n-2", "0-C", { boardNotice: { id: "swarm-1", seq: 4 } }), incoming("d-4", "0-C")]);
+			await peer.settled();
+			expect(sender.delivered.map(msg => [msg.from, msg.replyTo])).toEqual([["0-A", "d-4"]]);
+		});
 	});
 
 	describe("AgentSession.deliverIrcMessage", () => {
@@ -828,6 +922,28 @@ describe("IRC", () => {
 			expect(parentSteer?.role).toBe("user");
 			if (parentSteer?.role !== "user") throw new Error("expected queued parent IRC steer");
 			expect(parentSteer.content).toContain("change approach");
+		});
+
+		it("queues a parent's board notice for the next boundary without steering or interrupting a wait", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-notice",
+				from: "Main",
+				to: "0-Child",
+				body: "[swarm] board moved: #4; swarm_read{since:2}",
+				ts: Date.now(),
+				boardNotice: { id: "swarm-1", seq: 4 },
+			});
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.hasQueuedIrcFrom("Main")).toBe(true);
 		});
 	});
 });

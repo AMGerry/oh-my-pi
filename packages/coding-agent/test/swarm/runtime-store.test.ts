@@ -42,10 +42,10 @@ test("runtime events observe the already durable board and only one writer per d
 		});
 	});
 	expect(runtime.open(path.join(dir, "."))).toBe(board);
-	const post = runtime.post(board.metadata.id, "coordinator", "A durable post");
+	const post = runtime.append(board.metadata.id, "coordinator", "A durable post");
 	expect(observed).toEqual([{ head: 1, post, eventPost: post, lastPostSeq: 1 }]);
 	unsubscribe();
-	runtime.post(board.metadata.id, "coordinator", "A later post");
+	runtime.append(board.metadata.id, "coordinator", "A later post");
 	expect(observed).toHaveLength(1);
 	expect(new SwarmRuntime().open(dir).head).toBe(2);
 });
@@ -63,7 +63,7 @@ test("a committed post rings the doorbell even when members.json cannot record i
 	const events: SwarmEvent[] = [];
 	runtime.onChange(event => events.push(event));
 
-	const post = runtime.post(board.metadata.id, "coordinator", "Durable despite metadata");
+	const post = runtime.append(board.metadata.id, "coordinator", "Durable despite metadata");
 
 	expect(warn).toHaveBeenCalledTimes(1);
 	vi.restoreAllMocks();
