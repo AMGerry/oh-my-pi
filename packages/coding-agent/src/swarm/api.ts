@@ -3,6 +3,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/irc";
 import type { PreparedSwarmMember, SwarmLaunchPlan, SwarmMemberContext } from "./context";
+import type { ScheduledTaskSnapshot } from "./scheduler";
 import {
 	memberNameSchema,
 	sequenceSchema,
@@ -65,6 +66,23 @@ export type PostParams = typeof postSchema.infer;
 export type ReadParams = typeof readSchema.infer;
 export type WaitParams = typeof waitSchema.infer;
 
+export const scheduleSchema = type({
+	action: "'create'",
+	cron: "string > 0",
+	prompt: "string > 0",
+	"daemon?": "boolean",
+	"+": "reject",
+})
+	.or({ action: "'list'", "+": "reject" })
+	.or({ action: "'kill'", id: "string > 0", "+": "reject" });
+export type ScheduleParams = typeof scheduleSchema.infer;
+export interface SwarmScheduleResult {
+	boardUri: string;
+	id?: string;
+	task?: ScheduledTaskSnapshot;
+	tasks?: ScheduledTaskSnapshot[];
+}
+
 /** A disconnected caller leaves pending messages available to its next persisted turn. */
 export const SWARM_WAIT_DISCONNECTED = Symbol("swarm wait disconnected");
 
@@ -123,6 +141,7 @@ export interface SwarmApi {
 	post(actor: SwarmActor, text: string, channel?: string): Promise<SwarmPostResult>;
 	read(actor: SwarmActor, options?: BoardReadOptions): Promise<SwarmReadResult>;
 	wait(actor: SwarmActor, options: WaitParams, signal?: AbortSignal): Promise<SwarmWaitResult>;
+	schedule(actor: SwarmActor, options: ScheduleParams): Promise<SwarmScheduleResult>;
 	add(
 		caller: SwarmCaller,
 		request: AddMemberRequest,

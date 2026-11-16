@@ -112,6 +112,7 @@ import { SwarmTool } from "../swarm/tools/swarm";
 import { SwarmPostTool } from "../swarm/tools/swarm-post";
 import { SwarmReadTool } from "../swarm/tools/swarm-read";
 import { SwarmWaitTool } from "../swarm/tools/swarm-wait";
+import { SwarmScheduleTool } from "../swarm/tools/swarm-schedule";
 
 export * from "../edit";
 export * from "../goals";
@@ -122,6 +123,7 @@ export * from "../swarm/tools/swarm";
 export * from "../swarm/tools/swarm-post";
 export * from "../swarm/tools/swarm-read";
 export * from "../swarm/tools/swarm-wait";
+export * from "../swarm/tools/swarm-schedule";
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
@@ -643,6 +645,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	swarm_post: s => new SwarmPostTool(s),
 	swarm_read: s => new SwarmReadTool(s),
 	swarm_wait: s => new SwarmWaitTool(s),
+	swarm_schedule: s => new SwarmScheduleTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),

@@ -13,10 +13,13 @@ import { AgentRegistry, type AgentRef, type AgentRegistryApi } from "../registry
 import { AgentLifecycleManager, type AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { SessionManager } from "../session/session-manager";
+import { isUserTurnInitiator } from "../session/messages";
 import type {
 	AddMemberRequest,
 	ChannelRequest,
 	PrepareSwarmMember,
+	ScheduleParams,
+	SwarmScheduleResult,
 	SwarmActor,
 	SwarmApi,
 	SwarmCaller,
@@ -32,6 +35,7 @@ import { SWARM_WAIT_DISCONNECTED } from "./api";
 import { getSwarmMemberContext, type PreparedSwarmMember, type SwarmMemberOutcome } from "./context";
 import { createMemberWorkspace, removeMemberWorkspace } from "./workspaces";
 import { BoardStore, type CreateBoardOptions } from "./board-store";
+import { SwarmScheduler, type ScheduledTaskSnapshot, type SchedulerClock } from "./scheduler";
 import {
 	memberNameSchema,
 	SwarmRefusal,
@@ -65,6 +69,7 @@ export class SwarmRuntime implements SwarmApi {
 
 	/** Main-thread consumers that inspect the live store, including the board overlay. */
 	static local(): SwarmRuntime {
+		if (SwarmRuntime.#installed instanceof SwarmRuntime) return SwarmRuntime.#installed;
 		SwarmRuntime.#global ??= new SwarmRuntime();
 		return SwarmRuntime.#global;
 	}
@@ -89,6 +94,7 @@ export class SwarmRuntime implements SwarmApi {
 	readonly #waiters = new Map<string, PendingSwarmWait>();
 	readonly #activeLaunches = new Set<string>();
 	readonly #sessionObservers = new Map<string, { session: AgentSessionHandle; unsubscribe: () => void }>();
+	readonly scheduler: SwarmScheduler;
 	#disposed = false;
 	#unsubscribeRegistry: (() => void) | undefined;
 
@@ -96,13 +102,21 @@ export class SwarmRuntime implements SwarmApi {
 		private readonly registry: AgentRegistryApi = AgentRegistry.global(),
 		private readonly lifecycle: AgentLifecycleApi = AgentLifecycleManager.global(),
 		private readonly bus?: IrcBusApi,
+		clock?: SchedulerClock,
 	) {
 		if (!isMainThread) throw new Error("The writable swarm runtime belongs to the main thread");
+		this.scheduler = new SwarmScheduler({
+			canRun: owner => this.#canSchedule(owner),
+			run: (task, signal) => this.#runScheduledTurn(task, signal),
+			changed: swarmId => this.notify({ type: "members", swarmId }),
+			clock,
+		});
 	}
 
 	/** Release runtime subscriptions; session lifetime remains owned by AgentLifecycleManager. */
 	dispose(): void {
 		this.#disposed = true;
+		this.scheduler.dispose();
 		this.#unsubscribeRegistry?.();
 		this.#unsubscribeRegistry = undefined;
 		this.#listeners.clear();
@@ -550,6 +564,7 @@ export class SwarmRuntime implements SwarmApi {
 			const retainedBranches: string[] = [];
 			for (const target of targets.filter(member => !member.killed)) {
 				this.#closing.add(target.agentId);
+				this.scheduler.killOwner({ id: actor.id, name: target.name, agentId: target.agentId });
 				try {
 					const ref = this.registry.get(target.agentId);
 					if (ref) await this.lifecycle.release(target.agentId, ref, { tombstone: true });
@@ -757,6 +772,101 @@ export class SwarmRuntime implements SwarmApi {
 		const result = board.read(actor.name, options);
 		if (result.lastReadSeq !== prior) this.notify({ type: "members", swarmId: actor.id });
 		return { ...result, boardUri: board.boardUri };
+	}
+
+	async schedule(actor: SwarmActor, options: ScheduleParams): Promise<SwarmScheduleResult> {
+		const board = this.#authorize(actor);
+		if (options.action === "create") {
+			const task = this.scheduler.create(actor, options);
+			return { boardUri: board.boardUri, id: task.id, task };
+		}
+		if (options.action === "kill") {
+			this.scheduler.kill(actor, options.id);
+			return { boardUri: board.boardUri, id: options.id };
+		}
+		return { boardUri: board.boardUri, tasks: this.scheduler.list(actor) };
+	}
+
+	/** Native UI activity excludes board parking and background scheduled turns. */
+	isPassive(agentId: string): boolean {
+		return this.scheduler.isDaemon(agentId) || [...this.#waiters.values()].some(waiter => waiter.agentId === agentId);
+	}
+
+	#canSchedule(actor: SwarmActor): boolean {
+		if (this.#disposed || this.#closing.has(actor.agentId)) return false;
+		const board = this.#boards.get(actor.id);
+		const member = board
+			?.listMembers()
+			.find(candidate => candidate.name === actor.name && candidate.agentId === actor.agentId);
+		const ref = this.registry.get(actor.agentId);
+		if (!member || member.killed || member.error === "quota" || !ref || ref.status === "aborted") return false;
+		if (member.sessionFile && ref.sessionFile && member.sessionFile !== ref.sessionFile) return false;
+		return this.#memberState(member, actor.id) !== "working";
+	}
+
+	async #runScheduledTurn(task: ScheduledTaskSnapshot, signal: AbortSignal): Promise<void> {
+		const actor: SwarmActor = { id: task.swarmId, name: task.owner, agentId: task.agentId };
+		if (signal.aborted || !this.#canSchedule(actor)) return;
+		const key = `${actor.id}:${actor.agentId}`;
+		const priorWait = this.#waiters.get(key);
+		const session = await this.lifecycle.ensureLive(actor.agentId);
+		if (signal.aborted || !this.#canSchedule(actor)) return;
+		const finished = Promise.withResolvers<void>();
+		const stopState = session.subscribeRunState(state => {
+			if (state === "idle") finished.resolve();
+		});
+		const stopMessages = session.subscribe(event => {
+			if (
+				(event.type === "message_start" &&
+					((event.message.role === "user" && event.message.attribution !== "agent") ||
+						(event.message.role === "custom" && isUserTurnInitiator(event.message)))) ||
+				(event.type === "queue_update" && (event.steering.length > 0 || event.followUp.length > 0))
+			)
+				this.scheduler.promote(actor.agentId);
+		});
+		const stopBoard = this.onChange(event => {
+			const waiting = this.#waiters.get(key);
+			if (event.swarmId === actor.id && waiting && waiting !== priorWait) finished.resolve();
+		});
+		const abort = () => {
+			if (this.registry.get(actor.agentId)?.session === session)
+				void session.abort({ goalReason: "internal", deliverQueuedMessages: false }).catch(error => {
+					logger.error("Scheduled turn abort failed", { agentId: actor.agentId, error: String(error) });
+				});
+			finished.resolve();
+		};
+		signal.addEventListener("abort", abort, { once: true });
+		try {
+			if (signal.aborted) {
+				abort();
+				return;
+			}
+			// Only this turn's reply decides the outcome; an older failed reply is history.
+			const turnStart = session.messages.length;
+			const delivery = session.prompt(task.prompt, {
+				attribution: "agent",
+				userInitiated: false,
+				runCommands: false,
+				expandPromptTemplates: false,
+				throwOnDrop: true,
+				streamingBehavior: "steer",
+			});
+			void delivery.then(
+				() => {
+					if (!session.isStreaming) finished.resolve();
+				},
+				error => finished.reject(error),
+			);
+			await finished.promise;
+			const last = session.messages.slice(turnStart).findLast(message => message.role === "assistant");
+			if (!signal.aborted && last?.role === "assistant" && last.stopReason === "error")
+				throw new Error(last.errorMessage ?? "Scheduled model request failed");
+		} finally {
+			stopState();
+			stopMessages();
+			stopBoard();
+			signal.removeEventListener("abort", abort);
+		}
 	}
 
 	/** Actual pending waits, exposed to diagnostics and the headless acceptance gate. */

@@ -60,6 +60,8 @@ import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { SwarmRuntime } from "../../swarm/runtime";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
@@ -369,6 +371,8 @@ export class EventController {
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
+	#swarmUnsubscribe?: () => void;
+
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
 		// tiny/smol role with this session's registry and credentials; the
@@ -519,6 +523,8 @@ export class EventController {
 	}
 
 	dispose(): void {
+		this.#swarmUnsubscribe?.();
+		this.#swarmUnsubscribe = undefined;
 		this.#detachToolApprovalPreviewWaiter?.();
 		this.#detachToolApprovalPreviewWaiter = undefined;
 		this.#clearApprovalPreviewGates();
@@ -904,6 +910,8 @@ export class EventController {
 	}
 
 	subscribeToAgent(): void {
+		this.#swarmUnsubscribe?.();
+		this.#swarmUnsubscribe = SwarmRuntime.local().onChange(() => this.syncSwarmActivity());
 		// Serialize non-update dispatch behind any in-flight handler run:
 		// AgentSession.#emit fires listeners fire-and-forget (it does not await
 		// listener promises), so without this a rapid stream tail
@@ -1072,7 +1080,30 @@ export class EventController {
 	}
 
 	#syncComposerActivity(): void {
-		this.ctx.composer.setRunActive(this.#runActive || this.#maintenanceActive);
+		this.ctx.composer.setRunActive(!this.#isSwarmPassive() && (this.#runActive || this.#maintenanceActive));
+	}
+
+	#isSwarmPassive(): boolean {
+		return SwarmRuntime.local().isPassive(
+			this.ctx.focusedAgentId ?? this.ctx.session.getAgentId?.() ?? MAIN_AGENT_ID,
+		);
+	}
+
+	/** Reconcile conversation activity when a board wait or scheduled turn changes. */
+	syncSwarmActivity(): void {
+		const passive = this.#isSwarmPassive();
+		if (passive && this.ctx.loadingAnimation) {
+			const loader = this.ctx.loadingAnimation;
+			loader.stop();
+			this.ctx.statusContainer.removeChild(loader);
+			this.ctx.loadingAnimation = undefined;
+		} else if (!passive && this.#runActive && this.ctx.viewSession.isStreaming) {
+			this.ctx.ensureLoadingAnimation();
+		}
+		this.#syncComposerActivity();
+		this.#setTerminalProgress(this.#runActive || this.#maintenanceActive);
+		if (this.#runActive) setRunStatus({ state: passive ? "idle" : "working" });
+		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -1171,7 +1202,7 @@ export class EventController {
 	}
 
 	#setTerminalProgress(active: boolean): void {
-		if (active) {
+		if (active && !this.#isSwarmPassive()) {
 			// Tern reads the progress as the pane's busy state (its tab's live
 			// dot), so it gets it whatever the setting says. Tern's panes carry
 			// `KITTY_WINDOW_ID`, so `TERMINAL.id` says kitty there.
@@ -1286,10 +1317,10 @@ export class EventController {
 		// The turn owns progress from here; a compaction that started it hands it over.
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
-		this.ctx.ensureLoadingAnimation();
+		if (!this.#isSwarmPassive()) this.ctx.ensureLoadingAnimation();
 		this.#runActive = true;
 		this.#syncComposerActivity();
-		setRunStatus({ state: "working" });
+		setRunStatus({ state: this.#isSwarmPassive() ? "idle" : "working" });
 		this.ctx.ui.requestRender();
 	}
 
@@ -2614,6 +2645,7 @@ export class EventController {
 	 */
 	#ensureWorkingLoaderWhileStreaming(): void {
 		if (!this.ctx.viewSession.isStreaming) return;
+		if (this.#isSwarmPassive()) return;
 		if (this.ctx.autoCompactionLoader || this.ctx.retryLoader) return;
 		this.ctx.ensureLoadingAnimation();
 	}

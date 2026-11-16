@@ -4,6 +4,8 @@ import type {
 	AddMemberRequest,
 	ChannelRequest,
 	PrepareSwarmMember,
+	ScheduleParams,
+	SwarmScheduleResult,
 	SwarmActor,
 	SwarmApi,
 	SwarmCaller,
@@ -28,6 +30,7 @@ export type SwarmProtocol = {
 	post: RpcMethod<[actor: SwarmActor, text: string, channel?: string], SwarmPostResult>;
 	read: RpcMethod<[actor: SwarmActor, options?: BoardReadOptions], SwarmReadResult>;
 	wait: RpcMethod<[actor: SwarmActor, options: WaitParams, signal: AbortSignal], SwarmWaitResult>;
+	schedule: RpcMethod<[actor: SwarmActor, options: ScheduleParams], SwarmScheduleResult>;
 	add: RpcMethod<
 		[caller: SwarmCaller, request: AddMemberRequest, prepare: PrepareSwarmMember, signal?: AbortSignal],
 		SwarmControlResult
@@ -46,6 +49,7 @@ const serve: RpcServe<SwarmRuntime, SwarmProtocol> = {
 	status: (runtime, actor) => runtime.status(actor),
 	post: (runtime, actor, text, channel) => runtime.post(actor, text, channel),
 	read: (runtime, actor, options) => runtime.read(actor, options),
+	schedule: (runtime, actor, options) => runtime.schedule(actor, options),
 	wait: async (runtime, actor, options, signal) => {
 		const controller = new AbortController();
 		const abort = () =>
@@ -81,6 +85,9 @@ export class RemoteSwarmRuntime implements SwarmApi {
 	}
 	wait(actor: SwarmActor, options: WaitParams, signal?: AbortSignal): Promise<SwarmWaitResult> {
 		return this.remote.call("wait", actor, options, signal ?? new AbortController().signal);
+	}
+	schedule(actor: SwarmActor, options: ScheduleParams): Promise<SwarmScheduleResult> {
+		return this.remote.call("schedule", actor, options);
 	}
 	add(
 		caller: SwarmCaller,

@@ -185,3 +185,23 @@ it("clears a disconnected worker's real waiter while preserving its unread curso
 		waitSince: null,
 	});
 });
+
+it("shares scheduler create/list/kill across real worker threads", async () => {
+	const { runtime, caller } = boardFixture();
+	const [left, right] = await Promise.all([worker(), worker()]);
+	const added = await left.add(caller, { action: "add", name: "monitor", brief: "Monitor the board" });
+	const member = added.members.find(candidate => candidate.name === "monitor")!;
+	const actor = { id: added.id, name: member.name, agentId: member.agentId };
+	const coordinator = await runtime.ensure(caller);
+	const created = await left.schedule(actor, {
+		action: "create",
+		cron: "*/3 * * * *",
+		prompt: "Inspect stalls",
+		daemon: true,
+	});
+	expect(created.task).toMatchObject({ owner: "monitor", agentId: member.agentId, daemon: true, running: false });
+	expect((await right.schedule(coordinator, { action: "list" })).tasks).toEqual([created.task!]);
+	expect(runtime.scheduler.list(actor)).toEqual([created.task!]);
+	expect((await right.schedule(coordinator, { action: "kill", id: created.id! })).id).toBe(created.id);
+	expect((await left.schedule(actor, { action: "list" })).tasks).toEqual([]);
+});

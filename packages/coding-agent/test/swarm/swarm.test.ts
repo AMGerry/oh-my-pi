@@ -13,8 +13,16 @@ import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { SessionManager } from "../../src/session/session-manager";
+import { EventController } from "../../src/modes/controllers/event-controller";
+import { cfgTerminalShowProgress } from "../../src/modes/settings";
+import * as runStatus from "../../src/utils/run-status";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
+import { createToolFixture } from "./tool-fixture";
 import { SwarmRuntime } from "../../src/swarm/runtime";
 import { getSwarmMemberContext } from "../../src/swarm/context";
+import type { SchedulerClock } from "../../src/swarm/scheduler";
+import { TestSchedulerClock } from "./scheduler-clock";
 import { SwarmTool } from "../../src/swarm/tools/swarm";
 import { SwarmPostTool } from "../../src/swarm/tools/swarm-post";
 import { cfgSwarmEnabled, cfgSwarmMaxMembers } from "../../src/swarm/settings";
@@ -36,7 +44,7 @@ afterEach(async () => {
 	IrcBus.resetGlobalForTests();
 });
 
-async function fixture() {
+async function fixture(clock?: SchedulerClock) {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	SwarmRuntime.resetGlobalForTests();
@@ -76,7 +84,12 @@ async function fixture() {
 			find(provider, id),
 	);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
-		agents: [{ ...getBundledAgent("swarm")!, tools: ["read", "swarm", "swarm_post", "swarm_read", "swarm_wait"] }],
+		agents: [
+			{
+				...getBundledAgent("swarm")!,
+				tools: ["read", "swarm", "swarm_post", "swarm_read", "swarm_wait", "swarm_schedule"],
+			},
+		],
 		projectAgentsDir: null,
 	});
 	const settings = Settings.isolated({
@@ -109,7 +122,7 @@ async function fixture() {
 		sessionFile: journal.getSessionFile(),
 		status: "idle",
 	});
-	const runtime = new SwarmRuntime(registry, lifecycle);
+	const runtime = new SwarmRuntime(registry, lifecycle, undefined, clock);
 	SwarmRuntime.installGlobal(runtime);
 	const session: ToolSession = {
 		cwd,
@@ -484,6 +497,244 @@ describe("native swarm control tool", () => {
 			expect(f.replacement.calls).toHaveLength(1);
 		} finally {
 			await revived.dispose();
+		}
+	});
+
+	it("M4 native gate: cron steers a waiting monitor, skips overlap and parks at the next wait", async () => {
+		const clock = new TestSchedulerClock();
+		const f = await fixture(clock);
+		f.model.push({
+			content: [
+				{
+					type: "toolCall",
+					id: "create-schedule",
+					name: "swarm_schedule",
+					arguments: {
+						action: "create",
+						cron: "* * * * *",
+						prompt: "Scheduled stall inspection",
+						daemon: true,
+					},
+				},
+			],
+		});
+		f.model.push({
+			content: [{ type: "toolCall", id: "initial-wait", name: "swarm_wait", arguments: { since: 1 } }],
+		});
+		const added = await f.tool.execute("monitor", {
+			action: "add",
+			name: "monitor",
+			role: "monitor",
+			brief: "Monitor board stalls",
+		});
+		expect(added.isError).not.toBe(true);
+		const member = added.details!.result!.members.find(candidate => candidate.name === "monitor")!;
+		const actor = { id: added.details!.result!.id, name: "monitor", agentId: member.agentId };
+		await untilRuntime(f.runtime, () => f.runtime.waiters(actor.id).length === 1);
+		const task = f.runtime.scheduler.list(actor)[0]!;
+		expect(task).toMatchObject({ daemon: true, running: false, owner: "monitor" });
+		expect(f.runtime.isPassive(member.agentId)).toBe(true);
+
+		const firstStarted = Promise.withResolvers<void>();
+		const firstResponse = Promise.withResolvers<MockResponse>();
+		cleanups.push(async () => {
+			firstResponse.resolve({ content: ["Scheduler cleanup"] });
+		});
+		f.model.push(() => {
+			firstStarted.resolve();
+			return firstResponse.promise;
+		});
+		await clock.advanceBy(60_000);
+		await firstStarted.promise;
+		expect(f.runtime.scheduler.isDaemon(member.agentId)).toBe(true);
+		expect(f.runtime.scheduler.list(actor)[0]?.running).toBe(true);
+		expect(JSON.stringify(f.model.calls.at(-1)?.context.messages)).toContain("Scheduled stall inspection");
+		expect(JSON.stringify(f.model.calls.at(-1)?.context.messages)).toContain("Monitor board stalls");
+		expect(f.model.calls).toHaveLength(3);
+		await clock.advanceBy(60_000);
+		expect(f.model.calls).toHaveLength(3);
+		firstResponse.resolve({
+			content: [{ type: "toolCall", id: "first-tick-wait", name: "swarm_wait", arguments: { since: 1 } }],
+		});
+		await untilRuntime(
+			f.runtime,
+			() => f.runtime.scheduler.list(actor)[0]?.running === false && f.runtime.waiters(actor.id).length === 1,
+		);
+
+		const secondStarted = Promise.withResolvers<void>();
+		f.model.push(() => {
+			secondStarted.resolve();
+			return {
+				content: [{ type: "toolCall", id: "second-tick-wait", name: "swarm_wait", arguments: { since: 1 } }],
+			};
+		});
+		await clock.advanceBy(60_000);
+		await secondStarted.promise;
+		await untilRuntime(
+			f.runtime,
+			() => f.runtime.scheduler.list(actor)[0]?.running === false && f.runtime.waiters(actor.id).length === 1,
+		);
+		expect(f.model.calls).toHaveLength(4);
+		const killed = await f.runtime.schedule(actor, { action: "kill", id: task.id });
+		expect(killed.id).toBe(task.id);
+		expect(clock.pending.size).toBe(0);
+		await clock.advanceBy(60_000 * 10);
+		expect(f.model.calls).toHaveLength(4);
+		await f.tool.execute("kill-monitor", { action: "kill", name: "monitor" });
+		expect(f.runtime.waiters(actor.id)).toEqual([]);
+	});
+
+	it("lets a monitor kill its cron inside the tick and still park on the board", async () => {
+		const clock = new TestSchedulerClock();
+		const f = await fixture(clock);
+		f.model.push({
+			content: [
+				{
+					type: "toolCall",
+					id: "create-schedule",
+					name: "swarm_schedule",
+					arguments: {
+						action: "create",
+						cron: "* * * * *",
+						prompt: "Scheduled stall inspection",
+						daemon: true,
+					},
+				},
+			],
+		});
+		f.model.push({
+			content: [{ type: "toolCall", id: "initial-wait", name: "swarm_wait", arguments: { since: 1 } }],
+		});
+		const added = await f.tool.execute("monitor", {
+			action: "add",
+			name: "monitor",
+			role: "monitor",
+			brief: "Monitor board stalls",
+		});
+		expect(added.isError).not.toBe(true);
+		const member = added.details!.result!.members.find(candidate => candidate.name === "monitor")!;
+		const actor = { id: added.details!.result!.id, name: "monitor", agentId: member.agentId };
+		await untilRuntime(f.runtime, () => f.runtime.waiters(actor.id).length === 1);
+		const task = f.runtime.scheduler.list(actor)[0]!;
+
+		// Going dormant per the monitor skill: kill the cron during the tick, then park for any post.
+		f.model.push({
+			content: [
+				{
+					type: "toolCall",
+					id: "dormant-kill",
+					name: "swarm_schedule",
+					arguments: { action: "kill", id: task.id },
+				},
+			],
+		});
+		f.model.push({
+			content: [
+				{ type: "toolCall", id: "dormant-wait", name: "swarm_wait", arguments: { since: 1, mentionsOnly: false } },
+			],
+		});
+		await clock.advanceBy(60_000);
+		await untilRuntime(
+			f.runtime,
+			() => f.runtime.waiters(actor.id)[0]?.mentionsOnly === false && !f.runtime.scheduler.isDaemon(member.agentId),
+		);
+		expect(f.model.calls).toHaveLength(4);
+		expect(f.runtime.scheduler.list(actor)).toEqual([]);
+		expect(clock.pending.size).toBe(0);
+		expect(f.runtime.isPassive(member.agentId)).toBe(true);
+		await clock.advanceBy(60_000 * 5);
+		expect(f.model.calls).toHaveLength(4);
+		await f.tool.execute("kill-monitor", { action: "kill", name: "monitor" });
+		expect(f.runtime.waiters(actor.id)).toEqual([]);
+	});
+
+	it("keeps a daemon out of native busy indicators until actual user input is queued", async () => {
+		initTheme();
+		const clock = new TestSchedulerClock();
+		const f = await fixture(clock);
+		const status = await f.tool.execute("status", { action: "status" });
+		const actor = { id: status.details!.result!.id, name: "coordinator", agentId: "Main" };
+		cfgTerminalShowProgress.set(f.settings, true);
+		const ctx = createInteractiveModeContext({
+			settings: f.settings,
+			session: { getAgentId: () => "Main", isStreaming: true },
+		});
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(ctx);
+		controller.subscribeToAgent();
+		cleanups.push(async () => {
+			controller.dispose();
+			ctx.unsubscribe?.();
+		});
+		const started = Promise.withResolvers<void>();
+		const response = Promise.withResolvers<MockResponse>();
+		cleanups.push(async () => {
+			response.resolve({ content: ["Daemon finished"] });
+		});
+		f.model.push(() => {
+			started.resolve();
+			return response.promise;
+		});
+		const scheduled = await f.runtime.schedule(actor, {
+			action: "create",
+			cron: "* * * * *",
+			prompt: "Inspect silently",
+			daemon: true,
+		});
+		await clock.advanceBy(60_000);
+		await started.promise;
+		await controller.handleEvent({ type: "agent_start" });
+		expect(f.runtime.scheduler.isDaemon("Main")).toBe(true);
+		expect(ctx.ensureLoadingAnimation).not.toHaveBeenCalled();
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		expect(ctx.ui.terminal.setProgress).not.toHaveBeenCalledWith(true);
+		expect(report).toHaveBeenLastCalledWith({ state: "idle" });
+		await f.root.prompt("Now answer my direct question", {
+			streamingBehavior: "steer",
+			userInitiated: true,
+			runCommands: false,
+			expandPromptTemplates: false,
+		});
+		expect(f.runtime.scheduler.isDaemon("Main")).toBe(false);
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(ctx.ensureLoadingAnimation).toHaveBeenCalled();
+		expect(ctx.ui.terminal.setProgress).toHaveBeenLastCalledWith(true);
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+		await f.runtime.schedule(actor, { action: "kill", id: scheduled.id! });
+		response.resolve({ content: ["Daemon finished"] });
+		await f.root.abort({ goalReason: "internal", deliverQueuedMessages: false });
+	});
+
+	it("clears native activity and the existing loader while a real board waiter is parked", async () => {
+		initTheme();
+		await using f = await createToolFixture({ "terminal.showProgress": true });
+		const stopped = vi.fn();
+		const ctx = createInteractiveModeContext({
+			settings: f.settings,
+			session: { getAgentId: () => "Main", isStreaming: true },
+			loadingAnimation: { stop: stopped },
+		});
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(ctx);
+		controller.subscribeToAgent();
+		const abort = new AbortController();
+		try {
+			await controller.handleEvent({ type: "agent_start" });
+			expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+			const waiting = f.runtime.wait(f.actor, { since: f.board.head }, abort.signal);
+			await f.parked("coordinator", waiting);
+			expect(stopped).toHaveBeenCalledTimes(1);
+			expect(ctx.loadingAnimation).toBeUndefined();
+			expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+			expect(ctx.ui.terminal.setProgress).toHaveBeenLastCalledWith(false);
+			expect(report).toHaveBeenLastCalledWith({ state: "idle" });
+			abort.abort();
+			expect((await waiting).interrupted).toBe(true);
+			expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		} finally {
+			abort.abort();
+			controller.dispose();
+			ctx.unsubscribe?.();
 		}
 	});
 

@@ -34,6 +34,7 @@ export const ESSENTIAL_BUILTIN_TOOL_NAMES: Record<string, true> = {
 	swarm_post: true,
 	swarm_read: true,
 	swarm_wait: true,
+	swarm_schedule: true,
 	learn: true,
 	manage_skill: true,
 	context_notes: true,

@@ -6,12 +6,14 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type {
 	AddMemberRequest,
+	ScheduleParams,
 	SwarmActor,
 	SwarmCaller,
 	SwarmControlResult,
 	SwarmPostResult,
 	SwarmReadResult,
 	SwarmWaitResult,
+	SwarmScheduleResult,
 	WaitParams,
 } from "../../src/swarm/api";
 import type { SwarmMemberOutcome } from "../../src/swarm/context";
@@ -30,6 +32,7 @@ export interface SwarmProbe {
 	post(actor: SwarmActor, text: string): Promise<SwarmPostResult>;
 	read(actor: SwarmActor): Promise<SwarmReadResult>;
 	wait(actor: SwarmActor, options: WaitParams, signal?: AbortSignal): Promise<SwarmWaitResult>;
+	schedule(actor: SwarmActor, options: ScheduleParams): Promise<SwarmScheduleResult>;
 	switchPeerModel(id: string, model: Model): Promise<string | undefined>;
 	writerGuard(): Promise<boolean>;
 }
@@ -44,6 +47,7 @@ const probe: SwarmProbe = {
 	post: (actor, text) => SwarmRuntime.global().post(actor, text),
 	read: actor => SwarmRuntime.global().read(actor),
 	wait: (actor, options, signal) => SwarmRuntime.global().wait(actor, options, signal),
+	schedule: (actor, options) => SwarmRuntime.global().schedule(actor, options),
 	add: (caller, request) =>
 		SwarmRuntime.global().add(caller, request, async plan => {
 			const agentId = `Bridge-${plan.name}`;

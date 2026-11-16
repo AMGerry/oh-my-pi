@@ -144,6 +144,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { SwarmRuntime } from "../swarm/runtime";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
@@ -2089,6 +2090,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
+	#swarmUiUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#subagentHudKey = "";
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
@@ -4817,6 +4819,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): boolean {
+		this.#swarmUiUnsubscribe ??= SwarmRuntime.local().onChange(() => this.#scheduleObserverUiSync());
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
@@ -4827,7 +4830,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#scheduleObserverUiSync();
 			});
 		}
-		const agentIds = getRunningSubagentBadgeAgentIds(registry);
+		const agentIds = getRunningSubagentBadgeAgentIds(registry).filter(
+			id => this.collabGuest || !SwarmRuntime.local().isPassive(id),
+		);
 		this.#runningSubagentCount = agentIds.length;
 		const inspectable = getInspectableSubagentCount(registry);
 		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
@@ -5607,7 +5612,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		| undefined {
 		const mode = cfgDisplayPinnedAgents.get(settings);
 		if (mode === "off") return undefined;
-		const sessions = this.#observerRegistry.getSessions();
+		const sessions = this.#observerRegistry
+			.getSessions()
+			.filter(session => this.collabGuest || !SwarmRuntime.local().isPassive(session.id));
 		const running = sessions.filter(isHudSubagent);
 		const expanded = this.#pinnedHudOverride ?? mode === "full";
 		const livePreview = cfgDisplaySubagentLivePreview.get(settings);
@@ -8175,6 +8182,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.dispose();
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
+		this.#swarmUiUnsubscribe?.();
+		this.#swarmUiUnsubscribe = undefined;
 		this.#agentRegistrySubscriptionTarget = undefined;
 		this.#eventController.dispose();
 		this.#codexResetFireworksController.dispose();
@@ -8903,6 +8912,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	ensureLoadingAnimation(): void {
+		if (SwarmRuntime.local().isPassive(this.focusedAgentId ?? this.session.getAgentId() ?? MAIN_AGENT_ID)) {
+			this.#stopLoadingAnimation(true);
+			return;
+		}
 		if (this.autoCompactionLoader || this.retryLoader) return;
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
