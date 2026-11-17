@@ -8,13 +8,16 @@ import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { motionEffectsEnabled } from "@oh-my-pi/pi-tui/motion-effects";
 import { SwarmBoardOverlay } from "@oh-my-pi/pi-tui/overlays/swarm-board";
+import type { NarratorAction } from "@oh-my-pi/pi-tui/overlays/swarm-view-model";
 import {
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
+	peekFileSync,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import {
@@ -50,7 +53,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
-import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { getAvailableThemes, getSymbolTheme, isLightTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext, ResumeSessionOptions } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
@@ -106,8 +109,9 @@ import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { createAgentHubRuntime } from "../agent-hub-runtime";
 import { SwarmBoardSource } from "../swarm-board-runtime";
 import { getSwarmMemberContext } from "../../swarm/context";
+import { SwarmCustomPageServer } from "../../swarm/custom-page";
 import { cfgSwarmBoardMaxBytes, cfgSwarmBoardTab, cfgSwarmEnabled } from "../../swarm/settings";
-import { getSwarmSurface, parseSwarmUrl } from "../../swarm/surface";
+import { formatSwarmUrl, getSwarmSurface, parseSwarmUrl } from "../../swarm/surface";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { COPY_SELECTOR_OVERLAY_OPTIONS, CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
@@ -202,6 +206,8 @@ export class SelectorController {
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
 	#swarmSource?: SwarmBoardSource;
+	#swarmPage?: SwarmCustomPageServer;
+	#dismissSwarmBoard?: () => void;
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -2576,6 +2582,38 @@ export class SelectorController {
 		});
 	}
 
+	#navigateSwarm(source: SwarmBoardSource, action: NarratorAction): void {
+		if (!cfgSwarmEnabled.get(this.ctx.settings) || source !== this.#swarmSource)
+			throw new Error("This swarm view is closed");
+		const safe = source.resolveAction(action);
+		if (safe.type === "board_post") {
+			this.showSwarmBoard(formatSwarmUrl({ id: source.getState().id, tab: "board" }));
+			const board = this.#openMenus.get("swarm-board")?.component;
+			if (board instanceof SwarmBoardOverlay) board.showTab("board", safe.target);
+		} else if (safe.type === "open_conv") {
+			const selected = source.getState().members.find(candidate => candidate.name === safe.target);
+			if (!selected) throw new Error(`Unknown swarm member: ${safe.target}`);
+			this.#dismissSwarmBoard?.();
+			void this.ctx.focusAgentSession(selected.agentId).catch((error: unknown) => {
+				this.ctx.showError(`Could not open ${selected.name}: ${String(error)}`);
+			});
+		} else if (safe.type === "url") {
+			openPath(safe.target);
+		} else {
+			const preview = peekFileSync(safe.target, 65_537, bytes => ({
+				binary: bytes.includes(0),
+				truncated: bytes.byteLength > 65_536,
+				text: sanitizeText(new TextDecoder().decode(bytes.subarray(0, 65_536))),
+			}));
+			this.#dismissSwarmBoard?.();
+			this.ctx.showCommandReport({
+				title: path.basename(safe.target),
+				head: `${safe.target}${preview.truncated ? " · first 64 KiB" : ""}`,
+				body: new Text(preview.binary ? "Binary artifact" : preview.text, 0, 0),
+			});
+		}
+	}
+
 	showSwarmBoard(url?: string): void {
 		if (!cfgSwarmEnabled.get(this.ctx.settings)) {
 			this.ctx.showWarning("Swarm is disabled in Settings.");
@@ -2622,12 +2660,14 @@ export class SelectorController {
 			const done = () => {
 				if (closed) return;
 				closed = true;
+				if (this.#dismissSwarmBoard === done) this.#dismissSwarmBoard = undefined;
 				board.dispose();
 				menu.handle?.hide();
 				this.#releaseMenu("swarm-board", menu);
 				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
 			};
+			this.#dismissSwarmBoard = done;
 			const board = new SwarmBoardOverlay({
 				terminal: this.ctx.ui.terminal,
 				getState: () => source.getState(),
@@ -2639,19 +2679,20 @@ export class SelectorController {
 				onClose: done,
 				onNavigate: action => {
 					try {
-						const safe = source.resolveAction(action);
-						if (safe.type === "board_post") {
-							board.showTab("board", safe.target);
-						} else if (safe.type === "open_conv") {
-							const selected = source.getState().members.find(candidate => candidate.name === safe.target);
-							if (!selected) throw new Error(`Unknown swarm member: ${safe.target}`);
-							done();
-							void this.ctx.focusAgentSession(selected.agentId).catch((error: unknown) => {
-								this.ctx.showError(`Could not open ${selected.name}: ${String(error)}`);
-							});
-						} else {
-							openPath(safe.target);
-						}
+						this.#navigateSwarm(source, action);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCustomPage: () => {
+					try {
+						this.#swarmPage ??= new SwarmCustomPageServer({
+							source,
+							appearance: isLightTheme() ? "light" : "dark",
+							reducedMotion: !motionEffectsEnabled(),
+							onNavigate: action => this.#navigateSwarm(source, action),
+						});
+						openPath(this.#swarmPage.url);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -2664,6 +2705,14 @@ export class SelectorController {
 	}
 
 	closeSwarmBoard(): void {
+		this.#dismissSwarmBoard?.();
+		this.#dismissSwarmBoard = undefined;
+		const page = this.#swarmPage;
+		this.#swarmPage = undefined;
+		if (page)
+			void page
+				.dispose()
+				.catch((error: unknown) => logger.warn("Swarm page close failed", { error: String(error) }));
 		const menu = this.#openMenus.get("swarm-board");
 		if (menu?.component instanceof SwarmBoardOverlay) menu.component.dispose();
 		menu?.handle?.hide();

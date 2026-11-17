@@ -1356,3 +1356,25 @@ describe("dispose", () => {
 		expect(harness.renders).toBe(1);
 	});
 });
+
+describe("custom narrator page entry", () => {
+	it("opens the page only from Overview with an available revision", () => {
+		const requested = vi.fn();
+		const h = new Harness(overviewState({ customPageRevision: "page-v1" }));
+		const overlay = h.open({ onCustomPage: requested });
+		overlay.handleInput("o");
+		expect(requested).toHaveBeenCalledTimes(0);
+		overlay.showTab("overview");
+		expect(visible(overlay.render(80))).toContain("o Page");
+		overlay.handleInput("o");
+		overlay.handleNativeEvent({ type: "action", key: "custom-page", act: "custom-page" });
+		expect(requested).toHaveBeenCalledTimes(2);
+		expect(nodes(overlay.describe(cx)).some(item => clickAct(item) === "custom-page")).toBe(true);
+		h.publish(overviewState({ customPageError: "view.html is empty" }));
+		expect(visible(overlay.render(80))).toContain("Custom page update rejected");
+		expect(visible(overlay.render(80))).not.toContain("o Page");
+		overlay.handleInput("o");
+		expect(requested).toHaveBeenCalledTimes(2);
+		expect(nodes(overlay.describe(cx)).some(item => clickAct(item) === "custom-page")).toBe(false);
+	});
+});

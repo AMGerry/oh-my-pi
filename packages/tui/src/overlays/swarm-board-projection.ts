@@ -64,6 +64,13 @@ export function buildSwarmBoardRows(state: SwarmBoardState, tab: SwarmBoardTab, 
 			rows.push({ key: "view-error", title: "Overview update rejected", text: state.viewError, tone: "warning" });
 		if (state.planError)
 			rows.push({ key: "plan-error", title: "Plan update rejected", text: state.planError, tone: "warning" });
+		if (state.customPageError)
+			rows.push({
+				key: "custom-page-error",
+				title: "Custom page update rejected",
+				text: state.customPageError,
+				tone: "warning",
+			});
 		const view = state.view;
 		const plan = state.plan;
 		if (view) {

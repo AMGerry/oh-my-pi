@@ -10,6 +10,11 @@ import type { NarratorView, SwarmPlan } from "@oh-my-pi/pi-tui/overlays/swarm-vi
 import { SwarmViewStore } from "../../src/swarm/view-store";
 
 const LIMIT = 64 * 1024;
+const HTML_LIMIT = 48 * 1024;
+const FRAGMENT = '<section data-narrator-id="ws-draft"><h2>Draft</h2><p>Two of five files done.</p></section>';
+const DOCUMENT =
+	"<!doctype html>\n<html><head><style>body { color: var(--foreground); }</style></head>\n<body><p>Report</p></body></html>\n";
+const EMPTY_PAGE_ERROR = "view.html is empty or holds only whitespace";
 
 const VIEW: NarratorView = {
 	version: 1,
@@ -48,6 +53,14 @@ function viewOfBytes(bytes: number): string {
 	const padding = bytes - base;
 	const headline = "\u00e9".repeat(Math.floor(padding / 2)) + (padding % 2 === 1 ? "e" : "");
 	const text = JSON.stringify(headlineView(headline));
+	expect(Buffer.byteLength(text)).toBe(bytes);
+	return text;
+}
+
+/** A page whose text is exactly `bytes` UTF-8 bytes long; the padding mixes 2-byte and 1-byte characters. */
+function htmlOfBytes(bytes: number): string {
+	const padding = bytes - Buffer.byteLength("<p></p>");
+	const text = `<p>${"\u00e9".repeat(Math.floor(padding / 2))}${padding % 2 === 1 ? "e" : ""}</p>`;
 	expect(Buffer.byteLength(text)).toBe(bytes);
 	return text;
 }
@@ -577,5 +590,406 @@ describe("SwarmViewStore instances", () => {
 		fx.write("view.json", "{ nope");
 		expect(other.read().view).toBeUndefined();
 		expect(fx.store.read().view).toEqual(VIEW);
+	});
+});
+
+describe("SwarmViewStore view.html", () => {
+	test("returns a fragment exactly as written", () => {
+		using fx = new ViewDirFixture();
+		fx.write("view.html", FRAGMENT);
+
+		expect(fx.store.read()).toEqual({ html: FRAGMENT });
+	});
+
+	test("returns a full document exactly as written", () => {
+		using fx = new ViewDirFixture();
+		fx.write("view.html", DOCUMENT);
+
+		expect(fx.store.read()).toEqual({ html: DOCUMENT });
+	});
+
+	test("keeps the whitespace around the page", () => {
+		using fx = new ViewDirFixture();
+		fx.write("view.html", "\n  <p>x</p>\n\n");
+
+		expect(fx.store.read().html).toBe("\n  <p>x</p>\n\n");
+	});
+
+	test("accepts every text the browser can parse", () => {
+		using fx = new ViewDirFixture();
+		for (const page of [
+			"plain words",
+			"<p>unclosed",
+			"</div>",
+			"<custom-element></custom-element>",
+			"<!-- a comment -->",
+			"<html>",
+		]) {
+			fx.write("view.html", page);
+			expect(fx.store.read()).toEqual({ html: page });
+		}
+	});
+
+	test("reads a page that starts with a byte order mark", () => {
+		using fx = new ViewDirFixture();
+		fx.write("view.html", Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("<p>x</p>")]));
+
+		expect(fx.store.read()).toEqual({ html: "<p>x</p>" });
+	});
+
+	test("reads the view, the plan and the page together", () => {
+		using fx = new ViewDirFixture();
+		fx.writeView(VIEW);
+		fx.writePlan(PLAN);
+		fx.write("view.html", FRAGMENT);
+
+		expect(fx.store.read()).toEqual({ view: VIEW, plan: PLAN, html: FRAGMENT });
+	});
+
+	test("keeps its result stable while the file stays the same", () => {
+		using fx = new ViewDirFixture();
+		fx.write("view.html", FRAGMENT);
+		const first = fx.store.read();
+
+		expect(fx.store.read()).toEqual(first);
+		expect(fx.store.read()).toEqual(first);
+	});
+
+	test("replaces the page when the file changes", () => {
+		using fx = new ViewDirFixture();
+		fx.write("view.html", FRAGMENT);
+		expect(fx.store.read().html).toBe(FRAGMENT);
+
+		fx.write("view.html", DOCUMENT);
+		expect(fx.store.read()).toEqual({ html: DOCUMENT });
+	});
+
+	describe("empty and refused content", () => {
+		test("keeps the last accepted page while a rewrite is empty", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+
+			fx.write("view.html", "");
+			expect(fx.store.read()).toEqual({ html: FRAGMENT, htmlError: EMPTY_PAGE_ERROR });
+		});
+
+		test("treats whitespace, a lone byte order mark and non-breaking spaces as empty", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+
+			for (const blank of ["   ", "\n\t \r\n", "\u00a0\u2003", "\ufeff"]) {
+				fx.write("view.html", blank);
+				expect(fx.store.read()).toEqual({ html: FRAGMENT, htmlError: EMPTY_PAGE_ERROR });
+			}
+			fx.write("view.html", Buffer.from([0xef, 0xbb, 0xbf]));
+			expect(fx.store.read()).toEqual({ html: FRAGMENT, htmlError: EMPTY_PAGE_ERROR });
+		});
+
+		test("keeps reporting the same reason for unchanged blank content", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+			fx.write("view.html", " \n ");
+
+			const first = fx.store.read();
+			expect(fx.store.read()).toEqual(first);
+		});
+
+		test("a blank first page yields the reason and an absent page", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", "\n");
+
+			const read = fx.store.read();
+			expect(read.html).toBeUndefined();
+			expect(read.htmlError).toBe(EMPTY_PAGE_ERROR);
+		});
+
+		test("accepts the next page and clears the reason", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+			fx.write("view.html", "");
+			expect(fx.store.read().htmlError).toBe(EMPTY_PAGE_ERROR);
+
+			fx.write("view.html", DOCUMENT);
+			expect(fx.store.read()).toEqual({ html: DOCUMENT });
+		});
+
+		test("keeps the last accepted page when the bytes are invalid UTF-8", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+			fx.write("view.html", Buffer.from([0x3c, 0x70, 0x3e, 0xff, 0xfe]));
+
+			expect(fx.store.read()).toEqual({ html: FRAGMENT, htmlError: "view.html is not valid UTF-8" });
+		});
+
+		test("an invalid first page yields the reason and an absent page", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", Buffer.from([0xc3, 0x28]));
+
+			const read = fx.store.read();
+			expect(read.html).toBeUndefined();
+			expect(read.htmlError).toBe("view.html is not valid UTF-8");
+		});
+	});
+
+	describe("size limit", () => {
+		test("accepts a page of exactly 48 KB and refuses one more byte", () => {
+			using fx = new ViewDirFixture();
+			const atLimit = htmlOfBytes(HTML_LIMIT);
+			fx.write("view.html", atLimit);
+			expect(fx.store.read()).toEqual({ html: atLimit });
+
+			fx.write("view.html", htmlOfBytes(HTML_LIMIT + 1));
+			expect(fx.store.read()).toEqual({ html: atLimit, htmlError: `view.html is larger than ${HTML_LIMIT} bytes` });
+		});
+
+		test("measures the limit in UTF-8 bytes", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+			const page = htmlOfBytes(HTML_LIMIT + 1);
+			expect(page.length).toBeLessThan(HTML_LIMIT);
+			fx.write("view.html", page);
+
+			expect(fx.store.read()).toEqual({ html: FRAGMENT, htmlError: `view.html is larger than ${HTML_LIMIT} bytes` });
+		});
+
+		test("an oversized first page yields the reason and an absent page, then recovers", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", htmlOfBytes(HTML_LIMIT + 1));
+			const refused = fx.store.read();
+			expect(refused.html).toBeUndefined();
+			expect(refused.htmlError).toMatch(/larger than 49152 bytes/);
+
+			fx.write("view.html", FRAGMENT);
+			expect(fx.store.read()).toEqual({ html: FRAGMENT });
+		});
+
+		test("holds the page to a lower ceiling than the JSON files", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.json", viewOfBytes(HTML_LIMIT + 1));
+			fx.write("view.html", htmlOfBytes(HTML_LIMIT + 1));
+
+			const read = fx.store.read();
+			expect(read.error).toBeUndefined();
+			expect(read.view?.headline.length).toBeGreaterThan(20_000);
+			expect(read.html).toBeUndefined();
+			expect(read.htmlError).toBe(`view.html is larger than ${HTML_LIMIT} bytes`);
+		});
+
+		test("caps a larger limit at 48 KB for the page and at 64 KB for the JSON files", () => {
+			using fx = new ViewDirFixture();
+			const store = new SwarmViewStore(fx.dir, 10_000_000);
+			fx.write("view.json", viewOfBytes(LIMIT));
+			fx.write("view.html", htmlOfBytes(HTML_LIMIT + 1));
+
+			const read = store.read();
+			expect(read.error).toBeUndefined();
+			expect(read.view).toBeDefined();
+			expect(read.htmlError).toBe(`view.html is larger than ${HTML_LIMIT} bytes`);
+		});
+
+		test("honors a smaller limit for the page as well", () => {
+			using fx = new ViewDirFixture();
+			const store = new SwarmViewStore(fx.dir, 40);
+			const fits = `<p>${"x".repeat(33)}</p>`;
+			expect(Buffer.byteLength(fits)).toBe(40);
+			fx.write("view.html", fits);
+			expect(store.read()).toEqual({ html: fits });
+
+			fx.write("view.html", `${fits}!`);
+			expect(store.read()).toEqual({ html: fits, htmlError: "view.html is larger than 40 bytes" });
+		});
+
+		test("reads at most one byte past the limit from a huge page", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", Buffer.alloc(2_000_000, 0x20));
+			const reads = vi.spyOn(fs, "readSync");
+
+			const read = fx.store.read();
+			expect(read.htmlError).toBe(`view.html is larger than ${HTML_LIMIT} bytes`);
+			const calls: readonly (readonly unknown[])[] = reads.mock.calls;
+			const requested = calls.map(call => Number(call[3]));
+			expect(requested.length).toBeGreaterThan(0);
+			expect(requested.reduce((total, length) => total + length, 0)).toBeLessThanOrEqual(HTML_LIMIT + 1);
+		});
+	});
+
+	describe("removal", () => {
+		test("drops the page and its reason once the file is gone", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			expect(fx.store.read().html).toBe(FRAGMENT);
+
+			fx.remove("view.html");
+			expect(fx.store.read()).toEqual({});
+
+			fx.write("view.html", "");
+			expect(fx.store.read().htmlError).toBe(EMPTY_PAGE_ERROR);
+			fx.remove("view.html");
+			expect(fx.store.read()).toEqual({});
+		});
+
+		test("accepts a new page after a removal, also with the same text", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+			fx.remove("view.html");
+			expect(fx.store.read().html).toBeUndefined();
+
+			fx.write("view.html", FRAGMENT);
+			expect(fx.store.read()).toEqual({ html: FRAGMENT });
+			fx.remove("view.html");
+			fx.write("view.html", DOCUMENT);
+			expect(fx.store.read()).toEqual({ html: DOCUMENT });
+		});
+
+		test("leaves the view and the plan in place", () => {
+			using fx = new ViewDirFixture();
+			fx.writeView(VIEW);
+			fx.writePlan(PLAN);
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+
+			fx.remove("view.html");
+			expect(fx.store.read()).toEqual({ view: VIEW, plan: PLAN });
+		});
+
+		test("forgets the page when the directory disappears", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			expect(fx.store.read().html).toBe(FRAGMENT);
+
+			fs.rmSync(fx.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 25 });
+			expect(fx.store.read()).toEqual({});
+		});
+	});
+
+	describe("containment", () => {
+		test.skipIf(!SYMLINKS)("refuses a symlink that leads outside the board directory", () => {
+			using fx = new ViewDirFixture();
+			const target = path.join(fx.outside, "view.html");
+			fs.writeFileSync(target, FRAGMENT);
+			fs.symlinkSync(target, fx.file("view.html"), "file");
+
+			const read = fx.store.read();
+			expect(read.html).toBeUndefined();
+			expect(read.htmlError).toBe("view.html resolves to a path outside the board directory");
+		});
+
+		test.skipIf(!SYMLINKS)("keeps the last accepted page when the file turns into an outside symlink", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+
+			const target = path.join(fx.outside, "view.html");
+			fs.writeFileSync(target, "<p>smuggled</p>");
+			fs.rmSync(fx.file("view.html"));
+			fs.symlinkSync(target, fx.file("view.html"), "file");
+
+			expect(fx.store.read()).toEqual({
+				html: FRAGMENT,
+				htmlError: "view.html resolves to a path outside the board directory",
+			});
+		});
+
+		test.skipIf(!SYMLINKS)("follows a symlink that stays inside the board directory", () => {
+			using fx = new ViewDirFixture();
+			fs.writeFileSync(fx.file("page.2026.html"), FRAGMENT);
+			fs.symlinkSync(fx.file("page.2026.html"), fx.file("view.html"), "file");
+
+			expect(fx.store.read()).toEqual({ html: FRAGMENT });
+		});
+
+		test("refuses a directory in place of the file", () => {
+			using fx = new ViewDirFixture();
+			fs.mkdirSync(fx.file("view.html"));
+
+			const read = fx.store.read();
+			expect(read.html).toBeUndefined();
+			expect(read.htmlError).toBe("view.html is not a regular file");
+		});
+	});
+
+	describe("next to the JSON files", () => {
+		test("a refused page leaves the view and the plan untouched", () => {
+			using fx = new ViewDirFixture();
+			fx.writeView(VIEW);
+			fx.writePlan(PLAN);
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+
+			fx.write("view.html", "  ");
+			const read = fx.store.read();
+			expect(read.view).toEqual(VIEW);
+			expect(read.plan).toEqual(PLAN);
+			expect(read.error).toBeUndefined();
+			expect(read.planError).toBeUndefined();
+			expect(read.html).toBe(FRAGMENT);
+			expect(read.htmlError).toBe(EMPTY_PAGE_ERROR);
+		});
+
+		test("a broken view keeps its last good value and leaves the page alone", () => {
+			using fx = new ViewDirFixture();
+			fx.writeView(VIEW);
+			fx.write("view.html", FRAGMENT);
+			const good = fx.store.read().view;
+
+			fx.write("view.json", "{ nope");
+			const read = fx.store.read();
+			expect(read.view).toBe(good);
+			expect(read.error).toMatch(/^view\.json is not valid JSON/);
+			expect(read.html).toBe(FRAGMENT);
+			expect(read.htmlError).toBeUndefined();
+
+			fx.writeView(headlineView("Repaired."));
+			const repaired = fx.store.read();
+			expect(repaired.error).toBeUndefined();
+			expect(repaired.view?.headline).toBe("Repaired.");
+			expect(repaired.html).toBe(FRAGMENT);
+		});
+
+		test("a broken plan keeps its last good value and leaves the page alone", () => {
+			using fx = new ViewDirFixture();
+			fx.writePlan(PLAN);
+			fx.write("view.html", FRAGMENT);
+			fx.store.read();
+
+			fx.write("plan.json", JSON.stringify({ ...PLAN, threads: [] }));
+			const read = fx.store.read();
+			expect(read.plan).toEqual(PLAN);
+			expect(read.planError).toMatch(/^plan\.json: invalid swarm plan: /);
+			expect(read.html).toBe(FRAGMENT);
+			expect(read.htmlError).toBeUndefined();
+		});
+
+		test("a page next to missing JSON files yields only the page", () => {
+			using fx = new ViewDirFixture();
+			fx.write("view.html", FRAGMENT);
+
+			const read = fx.store.read();
+			expect(read.view).toBeUndefined();
+			expect(read.plan).toBeUndefined();
+			expect(read.error).toBeUndefined();
+			expect(read.planError).toBeUndefined();
+		});
+
+		test("the limits of view.json and view.html apply independently", () => {
+			using fx = new ViewDirFixture();
+			fx.writeView(VIEW);
+			fx.write("view.html", htmlOfBytes(HTML_LIMIT));
+			fx.store.read();
+
+			fx.write("view.json", viewOfBytes(LIMIT + 1));
+			const read = fx.store.read();
+			expect(read.error).toBe(`view.json is larger than ${LIMIT} bytes`);
+			expect(read.view).toEqual(VIEW);
+			expect(read.html).toBe(htmlOfBytes(HTML_LIMIT));
+			expect(read.htmlError).toBeUndefined();
+		});
 	});
 });

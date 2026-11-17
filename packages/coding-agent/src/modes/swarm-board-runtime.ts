@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SwarmBoardState } from "@oh-my-pi/pi-tui/overlays/swarm-board-types";
-import type { NarratorAction } from "@oh-my-pi/pi-tui/overlays/swarm-view-model";
+import { type NarratorAction, parseNarratorAction } from "@oh-my-pi/pi-tui/overlays/swarm-view-model";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SwarmRuntime } from "../swarm/runtime";
 import { getSwarmSurface, getSwarmSurfaceAt } from "../swarm/surface";
@@ -13,6 +14,7 @@ const WATCHED_FILES: Record<string, true> = {
 	"members.json": true,
 	"channels.json": true,
 	"view.json": true,
+	"view.html": true,
 	"plan.json": true,
 };
 
@@ -30,6 +32,7 @@ export class SwarmBoardSource {
 	#state: SwarmBoardState = { id: "", title: "Swarm", head: 0, posts: [], members: [] };
 	#dir: string;
 	#view: SwarmViewStore | undefined;
+	#html?: string;
 	#watcher: fs.FSWatcher | undefined;
 	#watchPath: string | undefined;
 	#stopRuntime: (() => void) | undefined;
@@ -50,6 +53,10 @@ export class SwarmBoardSource {
 	}
 	get dir(): string {
 		return this.#dir;
+	}
+
+	get customPageHtml(): string | undefined {
+		return this.#html;
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -87,13 +94,17 @@ export class SwarmBoardSource {
 				surface = getSwarmSurface(this.options.id, options);
 			if (!surface && fs.existsSync(path.join(ownDir, "swarm.json")))
 				throw new Error("The session's swarm board could not be read.");
-			if (!surface) next = { id: "", title: "Swarm", head: 0, posts: [], members: [] };
-			else {
+			if (!surface) {
+				this.#html = undefined;
+				next = { id: "", title: "Swarm", head: 0, posts: [], members: [] };
+			} else {
 				if (!this.#view || surface.board.dir !== this.#dir) {
 					this.#dir = surface.board.dir;
 					this.#view = new SwarmViewStore(this.#dir, this.options.maxBytes);
 				}
-				const documents = this.#view.read();
+				const customPage = surface.board.capabilities.customPage;
+				const documents = this.#view.read(customPage);
+				this.#html = customPage ? documents.html : undefined;
 				next = {
 					...surface.snapshot,
 					posts: surface.board.posts(),
@@ -101,6 +112,9 @@ export class SwarmBoardSource {
 					plan: documents.plan,
 					viewError: documents.error,
 					planError: documents.planError,
+					customPageRevision:
+						this.#html === undefined ? undefined : createHash("sha256").update(this.#html).digest("hex"),
+					customPageError: customPage ? documents.htmlError : undefined,
 				};
 			}
 		} catch (error) {
@@ -179,7 +193,8 @@ export class SwarmBoardSource {
 	}
 
 	/** Validate navigation against the current evidence and this session's artifact tree. */
-	resolveAction(action: NarratorAction): NarratorAction {
+	resolveAction(request: unknown): NarratorAction {
+		const action = parseNarratorAction(request);
 		if (action.type === "board_post") {
 			if (!this.#state.posts.some(post => post.seq === action.target))
 				throw new Error(`Board post #${action.target} is unavailable`);

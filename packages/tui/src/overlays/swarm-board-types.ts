@@ -38,6 +38,8 @@ export interface SwarmBoardState {
 	readonly error?: string;
 	readonly viewError?: string;
 	readonly planError?: string;
+	readonly customPageRevision?: string;
+	readonly customPageError?: string;
 }
 
 export interface SwarmBoardDeps {
@@ -47,6 +49,7 @@ export interface SwarmBoardDeps {
 	requestRender(): void;
 	onClose(): void;
 	onNavigate(action: NarratorAction): void;
+	onCustomPage?(): void;
 	refresh(): void;
 	initialTab?: SwarmBoardTab;
 	since?: number;

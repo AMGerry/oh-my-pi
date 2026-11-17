@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Swarm Overview</title>
+<style nonce="{{NONCE}}">
+{{THEME}}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--background); color: var(--foreground); font: 14px/1.5 system-ui, sans-serif; }
+main { display: flex; flex-direction: column; width: min(100%, 640px); height: 100dvh; margin: auto; padding: 12px; gap: 10px; animation: arrive 160ms ease-out; }
+header, #navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+h1 { flex: 1; min-width: 0; margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+#sequence { color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+#navigation { padding: 8px 0; border-block: 1px solid var(--border); }
+#target { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
+button { font: inherit; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: 5px; padding: 4px 10px; cursor: pointer; transition: transform 120ms ease, border-color 120ms ease; }
+button:hover { border-color: var(--primary); transform: translateY(-1px); }
+button:active { transform: translateY(1px); }
+button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+button:disabled { cursor: wait; opacity: .6; }
+#status { margin: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
+iframe { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--background); }
+[hidden] { display: none !important; }
+@keyframes arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+:root[data-omp-reduced-motion="true"] *, :root[data-omp-reduced-motion="true"] *::before, :root[data-omp-reduced-motion="true"] *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+</style>
+</head>
+<body>
+<main>
+<header><h1 id="title">Swarm Overview</h1><span id="sequence"></span></header>
+<div id="navigation" hidden><span id="target"></span><button id="open" type="button">Open</button><button id="cancel" type="button">Cancel</button></div>
+<p id="status" role="status">Connecting…</p>
+<iframe id="page" title="Narrator custom page" sandbox="allow-scripts" referrerpolicy="no-referrer" hidden></iframe>
+</main>
+<script nonce="{{NONCE}}">
+(() => {
+	"use strict";
+	const config = {{CONFIG}};
+	const frame = document.getElementById("page");
+	const status = document.getElementById("status");
+	const navigation = document.getElementById("navigation");
+	const target = document.getElementById("target");
+	const open = document.getElementById("open");
+	const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+	document.documentElement.dataset.ompReducedMotion = config.reducedMotion ? "true" : "false";
+	let state;
+	let revision;
+	let pending;
+	let busy = false;
+	let enforced = false;
+	function showStatus(message) {
+		status.textContent = message;
+		status.hidden = !message;
+	}
+	if (!window.trustedTypes || typeof window.Sanitizer !== "function" || typeof Element.prototype.setHTML !== "function") {
+		showStatus("Custom pages require a browser with Trusted Types and the native HTML Sanitizer API.");
+		return;
+	}
+	function sendData() {
+		if (state?.view && frame.contentWindow) frame.contentWindow.postMessage({ type: "omp:swarm:data", view: state.view, reducedMotion: config.reducedMotion || reducedMotion.matches }, "*");
+	}
+	reducedMotion.addEventListener("change", sendData);
+	window.addEventListener("message", event => {
+		if (!event.isTrusted || event.source !== frame.contentWindow || event.origin !== "null") return;
+		const message = event.data;
+		if (!message || typeof message !== "object" || Array.isArray(message)) return;
+		if (message.type === "omp:swarm:ready" && message.enforced === true) {
+			enforced = true;
+			frame.hidden = false;
+			sendData();
+			return;
+		}
+		if (message.type === "omp:swarm:error" && typeof message.message === "string") {
+			showStatus(`Custom page: ${message.message.slice(0, 280)}`);
+			return;
+		}
+		if (message.type !== "omp:swarm:navigate" || !enforced || busy) return;
+		const action = message.action;
+		if (!action || typeof action !== "object" || Array.isArray(action)) return;
+		if (!["open_conv", "board_post", "url", "file"].includes(action.type)) return;
+		if (action.type === "board_post") {
+			if (!Number.isSafeInteger(action.target) || action.target < 1) return;
+		} else if (typeof action.target !== "string" || !action.target || action.target.length > 4096) return;
+		pending = { type: action.type, target: action.target };
+		const labels = { open_conv: "Conversation", board_post: "Board post", url: "HTTPS link", file: "Artifact" };
+		target.textContent = `${labels[action.type]}: ${action.type === "board_post" ? "#" : ""}${action.target}`;
+		navigation.hidden = false;
+	});
+	document.getElementById("cancel").addEventListener("click", () => {
+		pending = undefined;
+		navigation.hidden = true;
+	});
+	open.addEventListener("click", async event => {
+		if (!event.isTrusted || !pending || busy) return;
+		const action = pending;
+		busy = true;
+		open.disabled = true;
+		try {
+			const response = await fetch(config.navigate, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-OMP-Swarm": "navigate" },
+				body: JSON.stringify(action),
+			});
+			if (!response.ok) throw new Error(await response.text());
+			pending = undefined;
+			navigation.hidden = true;
+			showStatus(state?.error ?? "");
+		} catch (error) { showStatus(String(error)); }
+		finally { busy = false; open.disabled = false; }
+	});
+	const events = new EventSource(config.events);
+	events.addEventListener("message", event => {
+		try { state = JSON.parse(event.data); }
+		catch { showStatus("The board update could not be read."); return; }
+		document.getElementById("title").textContent = state.title;
+		document.getElementById("sequence").textContent = `#${state.head}`;
+		document.title = `${state.title} · Swarm`;
+		if (state.revision !== revision) {
+			revision = state.revision;
+			pending = undefined;
+			navigation.hidden = true;
+			enforced = false;
+			frame.hidden = true;
+			if (revision) frame.src = `${config.frame}?revision=${encodeURIComponent(revision)}`;
+			else frame.removeAttribute("src");
+		} else sendData();
+		showStatus(state.error ?? (revision ? "" : "Waiting for view.html."));
+	});
+	events.addEventListener("error", () => showStatus("Connection interrupted. Reconnecting…"));
+	window.addEventListener("pagehide", () => events.close(), { once: true });
+})();
+</script>
+</body>
+</html>

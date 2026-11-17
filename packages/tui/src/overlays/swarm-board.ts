@@ -122,6 +122,7 @@ export class SwarmBoardOverlay implements Component {
 			this.#native = undefined;
 			this.deps.requestRender();
 		} else if (data === "r") this.deps.refresh();
+		else if (data === "o" && this.#tab === "overview" && this.#state.customPageRevision) this.deps.onCustomPage?.();
 		else if (this.#scroll.handleScrollKey(data)) {
 			this.#revealSelection = false;
 			this.deps.requestRender();
@@ -148,6 +149,8 @@ export class SwarmBoardOverlay implements Component {
 		} else if (event.type === "action") {
 			if (event.act === "close") this.deps.onClose();
 			else if (event.act === "refresh") this.deps.refresh();
+			else if (event.act === "custom-page" && this.#tab === "overview" && this.#state.customPageRevision)
+				this.deps.onCustomPage?.();
 			else {
 				for (const [index, item] of this.#rows.entries()) {
 					const action =
@@ -243,6 +246,7 @@ export class SwarmBoardOverlay implements Component {
 			"Tab View",
 			...(actions ? ["Enter Open"] : []),
 			...(actions > 1 ? ["←/→ Action"] : []),
+			...(this.#tab === "overview" && this.#state.customPageRevision && this.deps.onCustomPage ? ["o Page"] : []),
 			"r Refresh",
 			"Esc Close",
 		].join(" · ");
@@ -304,6 +308,9 @@ export class SwarmBoardOverlay implements Component {
 					{ keys: ["tab"], label: "View" },
 					{ keys: ["up", "down"], label: "Move" },
 				]),
+				...(this.#tab === "overview" && this.#state.customPageRevision && this.deps.onCustomPage
+					? [actionButton("Custom page", "custom-page", { keys: "o" })]
+					: []),
 				actionButton("Refresh", "refresh", { keys: "r" }),
 				actionButton("Close", "close", { keys: "escape" }),
 			]),

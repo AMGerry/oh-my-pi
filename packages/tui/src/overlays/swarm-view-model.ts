@@ -98,6 +98,7 @@ const boardPostActionSchema = type({ type: "'board_post'", target: positiveIntSc
 const urlActionSchema = type({ type: "'url'", target: "string", label: textSchema });
 const fileActionSchema = type({ type: "'file'", target: "string", label: textSchema });
 const actionSchema = openConvActionSchema.or(boardPostActionSchema).or(urlActionSchema).or(fileActionSchema);
+const navigationSchema = type({ type: "string", target: "string | number", "label?": "string" });
 
 const attentionSchema = type({
 	id: idSchema,
@@ -197,6 +198,22 @@ function isUsableAction(value: unknown): boolean {
 	if (value.type === "url") return isHttpsUrl(value.target);
 	if (value.type === "file") return isCleanAbsolutePath(value.target);
 	return true;
+}
+
+/** Validate an API navigation request and supply a label for the narrator's compact form. */
+export function parseNarratorAction(value: unknown): NarratorAction {
+	const navigation = navigationSchema(value);
+	if (navigation instanceof type.errors) throw new SwarmViewError("Invalid narrator navigation request");
+	const action = actionSchema({
+		type: navigation.type,
+		target: navigation.target,
+		label: navigation.label ?? String(navigation.target),
+	});
+	if (action instanceof type.errors || !isUsableAction(action))
+		throw new SwarmViewError(
+			"Navigation requires a roster name, board sequence, HTTPS URL or absolute file in the session's artifacts",
+		);
+	return action;
 }
 
 /**
