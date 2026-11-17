@@ -9,7 +9,7 @@ const worker: SwarmActor = { id: "board", name: "worker", agentId: "Worker" };
 const minute = 60_000;
 
 describe("swarm scheduler", () => {
-	it("M4 gate: fires twice, skips overlapping ticks and cancels the final deadline on kill", async () => {
+	it("fires twice, skips overlapping ticks and cancels the final deadline on kill", async () => {
 		const clock = new TestSchedulerClock();
 		const calls: ScheduledTaskSnapshot[] = [];
 		const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];

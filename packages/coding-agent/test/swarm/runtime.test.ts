@@ -54,7 +54,7 @@ function fixture() {
 }
 
 describe("swarm runtime waiting and delivery", () => {
-	it("M3 gate: keeps real waiters timer-free and wakes only the named worker within one second", async () => {
+	it("keeps real waiters timer-free and wakes only the named worker within one second", async () => {
 		const f = fixture();
 		vi.useFakeTimers();
 		const timeout = vi.spyOn(globalThis, "setTimeout");

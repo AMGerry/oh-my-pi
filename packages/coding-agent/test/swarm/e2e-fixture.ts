@@ -1,5 +1,5 @@
 /**
- * Harness for the swarm end-to-end scenarios (PORT-TO-OMP-PROMPT §10 and §13).
+ * Harness for the swarm end-to-end scenarios.
  *
  * A real coordinator `AgentSession` runs the native swarm tools under the registered main-agent id, attached to the
  * registry the way the SDK attaches its main session. Every member is a real native session started through `swarm add`,

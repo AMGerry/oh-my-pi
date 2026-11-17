@@ -1,5 +1,5 @@
 /**
- * Swarm end to end (PORT-TO-OMP-PROMPT §10, §13 steps 1-7): a real coordinator session, registered as the main agent,
+ * Swarm end to end: a real coordinator session, registered as the main agent,
  * starts real native members that work in a temporary git repository, driven by one scripted model. See `e2e-fixture.ts`
  * for the harness.
  */

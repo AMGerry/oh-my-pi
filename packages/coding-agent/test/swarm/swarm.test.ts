@@ -197,7 +197,7 @@ function untilRuntime(runtime: SwarmRuntime, condition: () => boolean): Promise<
 }
 
 describe("native swarm control tool", () => {
-	it("M2 gate: TaskTool add creates a working native session, kill tombstones it, and the name stays reserved", async () => {
+	it("TaskTool add creates a working native session, kill tombstones it, and the name stays reserved", async () => {
 		const f = await fixture();
 		expect(cfgTaskPerCallModel.get(f.settings)).toBe("off");
 		expect(
@@ -614,7 +614,7 @@ describe("native swarm control tool", () => {
 		expect(f.runtime.board(added.details!.result!.id).member("quota").error).toBeUndefined();
 	});
 
-	it("M4 native gate: cron steers a waiting monitor, skips overlap and parks at the next wait", async () => {
+	it("cron steers a waiting monitor, skips overlap and parks at the next wait", async () => {
 		const clock = new TestSchedulerClock();
 		const f = await fixture(clock);
 		f.model.push({

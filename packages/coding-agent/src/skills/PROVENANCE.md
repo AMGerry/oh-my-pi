@@ -1,13 +1,13 @@
 # Provenance of the bundled swarm skills
 
-- Source product: Antigravity swarm skills, the `swarm`, `swarm_monitor`, `swarm_narrator` and `swarm_pane` skills as delivered in the antigravity-swarm project root next to PORT-TO-OMP-PROMPT.md.
+- Source product: Antigravity swarm skills: `swarm`, `swarm_monitor`, `swarm_narrator` and `swarm_pane`.
 - Vendored on: 2026-11-16.
-- Produced by: `ai/scripts/vendor-swarm-skills.ts` (antigravity-swarm project root), which verifies the original hashes below before it writes.
+- Produced by: a generator that applies the manifest to the originals and verifies the original hashes below before it writes.
 - Manifest: `swarm-adaptation.json` lists per file the ordered operations `{before, after, count}`.
 
 ## Authorization
 
-The user permits reusing and adapting the skill content in this build and vendoring the adapted copies into the oh-my-pi tree (PORT-TO-OMP-PROMPT.md section 0.6). The permission is limited to the substitutions enumerated in section 2.4 of that document, plus the native tool, field and path names they imply and the alignment of the narrator rule, the model switch and the quota statements with the port brief, which the user approved on 2026-11-16 (ai/STATUS.md). The original SHA-256 per file and the complete diff are kept beside the vendored copies, all other skill bytes stay as published, and the skills stay credited to their source product.
+The adapted copies are vendored with the permission of the contributor who commissioned the swarm port, granted on 2026-11-16. The adaptation is limited to the substitutions listed in the manifest: the native tool, field and path names, and the narrator rule, the model switch and the quota statements as they apply in omp. The original SHA-256 per file and the complete diff are kept beside the vendored copies, all other skill bytes stay as published, and the skills stay credited to their source product.
 
 ## Hashes (SHA-256)
 
