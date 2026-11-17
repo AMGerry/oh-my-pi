@@ -75,7 +75,7 @@ describe("swarm_post behavior", () => {
 		expect(f.member("coordinator")?.lastReadSeq).toBe(0);
 	});
 
-	it("rings a numbered group by its base name and every member, the author included, for @all", async () => {
+	it("rings a numbered group by its base name and every other member for @all, never the author", async () => {
 		await using f = await createToolFixture();
 		await f.add("alice");
 		await f.add("parse", { n: 2 });
@@ -86,18 +86,8 @@ describe("swarm_post behavior", () => {
 		expect(single.receipts.map(receipt => receipt.name)).toEqual(["parse-2"]);
 		const everyone = resultJson<SwarmPostResult>(await tool.execute("all", { text: "@all status please" }));
 		expect(everyone.post.all).toBe(true);
-		expect(everyone.receipts.map(receipt => receipt.name).sort()).toEqual([
-			"alice",
-			"coordinator",
-			"parse-1",
-			"parse-2",
-		]);
-		// The author is addressed like everyone else; its receipt reports its own session availability.
-		expect(everyone.receipts.find(receipt => receipt.name === "coordinator")).toMatchObject({
-			to: "Main",
-			outcome: "failed",
-			error: expect.stringContaining("no live session"),
-		});
+		expect(everyone.receipts.map(receipt => receipt.name).sort()).toEqual(["alice", "parse-1", "parse-2"]);
+		expect(everyone.receipts.some(receipt => receipt.to === "Main")).toBe(false);
 	});
 
 	it("rings with a board notice that names the post and the recipient's own cursor", async () => {
@@ -112,19 +102,14 @@ describe("swarm_post behavior", () => {
 		);
 		expect(result.post.seq).toBe(3);
 		const outcomes = Object.fromEntries(result.receipts.map(receipt => [receipt.name, receipt.outcome]));
-		expect(outcomes).toEqual({ alice: "injected", bob: "failed", coordinator: "injected" });
+		expect(outcomes).toEqual({ alice: "injected", bob: "failed" });
 		expect(await aliceBell).toMatchObject({
 			from: "Main",
 			to: "Member-alice",
 			body: "[swarm] board moved: #3; swarm_read{since:1}",
 			boardNotice: { id: f.id, seq: 3 },
 		});
-		expect(await authorBell).toMatchObject({
-			from: "Main",
-			to: "Main",
-			body: "[swarm] board moved: #3; swarm_read{since:0}",
-			boardNotice: { id: f.id, seq: 3 },
-		});
+		// The author is addressed by @all but is not rung: its own post is no news to it.
 		// A doorbell is not a direct question the sender waits on.
 		expect(f.bus.unansweredSends("Main", 0)).toEqual([]);
 
@@ -134,8 +119,15 @@ describe("swarm_post behavior", () => {
 			await new SwarmPostTool(f.session("coordinator")).execute("narrow", { text: "@bob only you" }),
 		);
 		expect(narrow.receipts.map(receipt => receipt.name)).toEqual(["bob"]);
+		// The author's own bell was never rung, so it ends with the abort like alice's bystander bell.
+		const settled = (bell: Promise<unknown>): Promise<string> =>
+			bell.then(
+				() => "message",
+				(error: Error) => error.message,
+			);
+		const ends = [settled(bystander), settled(authorBell)];
 		controller.abort(new Error("stop"));
-		await expect(bystander).rejects.toThrow("stop");
+		expect(await Promise.all(ends)).toEqual(["stop", "stop"]);
 	});
 
 	it("posts to a named channel for its subscribers", async () => {
@@ -168,6 +160,68 @@ describe("swarm_post behavior", () => {
 		expect(body.receipts[0]).toMatchObject({ name: "bob", outcome: "failed" });
 		expect(body.receipts[0].error).toMatch(/killed/);
 		expect(f.member("bob")?.state).toBe("killed");
+	});
+});
+
+describe("swarm_post and its author", () => {
+	it("rings the members a coordinator names but not the coordinator it quotes", async () => {
+		await using f = await createToolFixture();
+		await f.add("alice");
+		const send = vi.spyOn(f.bus, "send");
+		const result = resultJson<SwarmPostResult>(
+			await new SwarmPostTool(f.session("coordinator")).execute("post", {
+				text: "@alice report with @coordinator [done]",
+			}),
+		);
+
+		// The post still addresses the coordinator; only the delivery skips its author.
+		expect(result.post).toMatchObject({ agent: "coordinator", mentions: ["alice", "coordinator"], all: false });
+		expect(result.receipts.map(receipt => receipt.name)).toEqual(["alice"]);
+		expect(send.mock.calls.map(call => call[0].to)).toEqual(["Member-alice"]);
+	});
+
+	it("rings every other member for a worker's @all and nobody for a worker's mention of itself", async () => {
+		await using f = await createToolFixture();
+		await f.add("alice");
+		await f.add("bob");
+		const send = vi.spyOn(f.bus, "send");
+		const tool = new SwarmPostTool(f.session("alice"));
+
+		const everyone = resultJson<SwarmPostResult>(await tool.execute("all", { text: "@all hello" }));
+		expect(everyone.post.all).toBe(true);
+		expect(everyone.receipts.map(receipt => receipt.name).sort()).toEqual(["bob", "coordinator"]);
+		expect(send.mock.calls.map(call => call[0].to).sort()).toEqual(["Main", "Member-bob"]);
+
+		send.mockClear();
+		const itself = resultJson<SwarmPostResult>(await tool.execute("self", { text: "@alice remember this" }));
+		expect(itself.post).toMatchObject({ agent: "alice", mentions: ["alice"] });
+		expect(itself.receipts).toEqual([]);
+		expect(send).not.toHaveBeenCalled();
+	});
+
+	it("rings a channel's subscribers, the narrator and the monitor for @#channel, but not the coordinator who posts it", async () => {
+		await using f = await createToolFixture();
+		await f.runtime.channel(await f.actorOf("coordinator"), { action: "channel", op: "create", channel: "ui" });
+		await f.add("alice", { channels: ["ui"] });
+		await f.add("bob");
+		await f.add("narrator");
+		await f.add("monitor");
+		const park = new AbortController();
+		const parked = f.runtime.wait(await f.actorOf("monitor"), { since: f.board.head }, park.signal);
+		await f.parked("monitor", parked);
+		const send = vi.spyOn(f.bus, "send");
+
+		const result = resultJson<SwarmPostResult>(
+			await new SwarmPostTool(f.session("coordinator")).execute("post", { text: "@#ui look at the layout" }),
+		);
+		expect(result.post).toMatchObject({ agent: "coordinator", mentions: ["#ui"] });
+		// The parked monitor is woken on the board; the subscriber and the narrator get a doorbell.
+		const outcomes = Object.fromEntries(result.receipts.map(receipt => [receipt.name, receipt.outcome]));
+		expect(Object.keys(outcomes).sort()).toEqual(["alice", "monitor", "narrator"]);
+		expect(outcomes.monitor).toBe("woken");
+		expect(send.mock.calls.map(call => call[0].to).sort()).toEqual(["Member-alice", "Member-narrator"]);
+		expect((await parked).messages.map(post => post.seq)).toEqual([result.post.seq]);
+		expect(f.runtime.waiters(f.id)).toEqual([]);
 	});
 });
 

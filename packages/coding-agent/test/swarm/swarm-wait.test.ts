@@ -370,3 +370,48 @@ describe("swarm.wait.maxMs", () => {
 		expect(cfgSwarmWaitMaxMs.get(settings)).toBe(300_000);
 	});
 });
+
+describe("swarm_wait and the caller's own posts", () => {
+	it("stays parked behind a cursor that lies below the caller's own post, and a foreign post returns both", async () => {
+		await using f = await createToolFixture();
+		await f.add("alice");
+		await f.post("alice", "ready");
+
+		const call = new SwarmWaitTool(f.session("alice")).execute("wait", { since: 1, mentionsOnly: false });
+		await f.parked("alice", call);
+		expect(f.member("alice")).toMatchObject({ state: "waiting", wakeMode: "any", waitSince: 1, lastReadSeq: 1 });
+
+		// The caller's own later post, as a parallel tool call would make it, does not end the park either.
+		const own = await f.post("alice", "Still here");
+		expect(own.receipts).toEqual([]);
+		expect(f.runtime.waiters(f.id)).toHaveLength(1);
+
+		const wake = await f.post("coordinator", "A note from the coordinator");
+		expect(wake.receipts).toEqual([{ name: "alice", to: "Member-alice", outcome: "woken" }]);
+		const result = await call;
+		expect(result.isError).not.toBe(true);
+		const body = resultJson<SwarmWaitResult>(result);
+		expect(body.messages.map(message => [message.seq, message.agent])).toEqual([
+			[2, "alice"],
+			[3, "alice"],
+			[4, "coordinator"],
+		]);
+		expect(body).toMatchObject({ lastReadSeq: 4, head: 4 });
+		expect(body.interrupted).toBeUndefined();
+		expect(f.runtime.waiters(f.id)).toEqual([]);
+		expect(f.member("alice")).toMatchObject({ state: "working", lastReadSeq: 4 });
+	});
+
+	it("keeps returning at once when the first post after the cursor is someone else's", async () => {
+		await using f = await createToolFixture();
+		await f.add("alice");
+		await f.post("coordinator", "A note before the wait");
+		await f.post("alice", "ready");
+		const body = resultJson<SwarmWaitResult>(
+			await new SwarmWaitTool(f.session("alice")).execute("wait", { since: 1, mentionsOnly: false }),
+		);
+		expect(seqs(body)).toEqual([2, 3]);
+		expect(body.lastReadSeq).toBe(3);
+		expect(f.runtime.waiters(f.id)).toEqual([]);
+	});
+});

@@ -327,3 +327,69 @@ describe("swarm member state", () => {
 		]);
 	});
 });
+
+describe("a member's own posts", () => {
+	it("leave a wait with an older cursor parked, and another member's post then returns both in order", async () => {
+		const f = fixture();
+		const id = f.board.metadata.id;
+		const own = await f.runtime.post(f.actor("alice"), "ready");
+		expect(own.receipts).toEqual([]);
+
+		// The cursor sits below the member's own post; that post alone is no reason to wake.
+		let settled = false;
+		const waiting = f.runtime.wait(f.actor("alice"), { since: 0, mentionsOnly: false }).finally(() => {
+			settled = true;
+		});
+		expect(f.runtime.waiters().map(waiter => waiter.name)).toEqual(["alice"]);
+		expect(f.runtime.snapshot(id).members.find(member => member.name === "alice")).toMatchObject({
+			state: "waiting",
+			wakeMode: "any",
+			waitSince: 0,
+		});
+		expect(settled).toBe(false);
+
+		const wake = await f.runtime.post(f.coordinator, "A progress note from the coordinator");
+		expect(wake.receipts).toEqual([{ name: "alice", to: "Member-alice", outcome: "woken" }]);
+		const result = await waiting;
+		expect(result.messages.map(post => [post.seq, post.agent])).toEqual([
+			[1, "alice"],
+			[2, "coordinator"],
+		]);
+		expect(result.interrupted).toBeUndefined();
+		expect(result).toMatchObject({ lastReadSeq: 2, head: 2 });
+		expect(f.board.member("alice")).toMatchObject({ lastReadSeq: 2, wakeMode: null, waitSince: null });
+		expect(f.runtime.waiters()).toEqual([]);
+	});
+
+	it("do not wake the author's own open wait, and its receipt does not list the author as woken", async () => {
+		const f = fixture();
+		const id = f.board.metadata.id;
+		let settled = false;
+		const waiting = f.runtime.wait(f.actor("alice"), { since: 0, mentionsOnly: false }).finally(() => {
+			settled = true;
+		});
+		const bystander = f.runtime.wait(f.actor("bob"), { since: 0, mentionsOnly: false });
+
+		// A post of its own while the wait is open, as a parallel tool call of the same member would make.
+		const own = await f.runtime.post(f.actor("alice"), "A note while I wait");
+		expect(own.receipts).toEqual([{ name: "bob", to: "Member-bob", outcome: "woken" }]);
+		expect(settled).toBe(false);
+		expect(f.runtime.waiters().map(waiter => waiter.name)).toEqual(["alice"]);
+		expect(f.runtime.snapshot(id).members.find(member => member.name === "alice")).toMatchObject({
+			state: "waiting",
+			waitSince: 0,
+		});
+		expect(f.board.member("alice").lastReadSeq).toBe(0);
+		expect((await bystander).messages.map(post => post.seq)).toEqual([1]);
+
+		const wake = await f.runtime.post(f.coordinator, "@alice now it is your turn");
+		expect(wake.receipts).toEqual([{ name: "alice", to: "Member-alice", outcome: "woken" }]);
+		const result = await waiting;
+		expect(result.messages.map(post => [post.seq, post.agent])).toEqual([
+			[1, "alice"],
+			[2, "coordinator"],
+		]);
+		expect(result.lastReadSeq).toBe(2);
+		expect(f.runtime.waiters()).toEqual([]);
+	});
+});

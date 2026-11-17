@@ -322,8 +322,13 @@ export class BoardStore {
 	hasPending(name: string, since: number, mentionsOnly: boolean): boolean {
 		this.member(name);
 		if (!Number.isSafeInteger(since) || since < 0) throw new SwarmRefusal("since must be a nonnegative safe integer");
+		// The caller's own posts are never news to it: a stale `since` must not turn a park into a wake loop.
 		return this.#posts.some(
-			post => post.seq > since && this.visible(post, name) && (!mentionsOnly || this.addresses(post, name)),
+			post =>
+				post.seq > since &&
+				post.agent !== name &&
+				this.visible(post, name) &&
+				(!mentionsOnly || this.addresses(post, name)),
 		);
 	}
 

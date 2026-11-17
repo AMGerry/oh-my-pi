@@ -932,3 +932,73 @@ describe("BoardStore visibility", () => {
 		expect(addressedAmong(store, relay, [...CAST, "narrator-2"])).toEqual(["narrator", "narrator-2"]);
 	});
 });
+
+describe("BoardStore hasPending", () => {
+	test("ignores a worker's own posts, with or without addressing and including a mention of itself", () => {
+		using fx = createBoardFixture();
+		const { store } = fx;
+		addWorker(store, "alice");
+		store.append("alice", "ready");
+		store.append("alice", "@alice a note to myself");
+		store.append("alice", "@all heads up");
+
+		for (const mentionsOnly of [false, true]) {
+			expect(store.hasPending("alice", 0, mentionsOnly), `mentionsOnly ${mentionsOnly}`).toBe(false);
+		}
+		// The same posts are news to the coordinator: they are visible to it, and the `@all` one names it.
+		expect(store.hasPending("coordinator", 0, false)).toBe(true);
+		expect(store.hasPending("coordinator", 0, true)).toBe(true);
+	});
+
+	test("ignores the coordinator's own posts, including a mention of itself, until another member posts", () => {
+		using fx = createBoardFixture();
+		const { store } = fx;
+		addWorker(store, "alice");
+		store.append("coordinator", "@coordinator remember the plan");
+		store.append("coordinator", "plain progress");
+
+		for (const mentionsOnly of [false, true]) {
+			expect(store.hasPending("coordinator", 0, mentionsOnly), `mentionsOnly ${mentionsOnly}`).toBe(false);
+		}
+		store.append("alice", "@coordinator [done] first slice");
+		expect(store.hasPending("coordinator", 0, true)).toBe(true);
+		expect(store.hasPending("coordinator", 0, false)).toBe(true);
+		expect(store.hasPending("coordinator", 3, false)).toBe(false);
+	});
+
+	test("turns true as soon as another member's visible post follows, and keeps the mention filter for others' posts", () => {
+		using fx = createBoardFixture();
+		const { store } = fx;
+		addWorker(store, "alice");
+		addWorker(store, "bob");
+		store.append("alice", "ready");
+		expect(store.hasPending("alice", 0, false)).toBe(false);
+
+		const chatter = store.append("bob", "unaddressed chatter");
+		expect(store.hasPending("alice", 0, false)).toBe(true);
+		expect(store.hasPending("alice", 0, true)).toBe(false);
+		expect(store.hasPending("alice", chatter.seq, false)).toBe(false);
+
+		const call = store.append("coordinator", "@alice take the next step");
+		expect(store.hasPending("alice", 0, true)).toBe(true);
+		expect(store.hasPending("alice", 0, false)).toBe(true);
+		expect(store.hasPending("alice", call.seq, true)).toBe(false);
+
+		// Another member's post before `since` is behind the cursor, and the member's own later post still adds nothing.
+		store.append("alice", "on it");
+		expect(store.hasPending("alice", call.seq, false)).toBe(false);
+		expect(store.hasPending("alice", call.seq, true)).toBe(false);
+	});
+
+	test("still reports nothing for an invisible post of another member, and keeps refusing a bad cursor", () => {
+		using fx = createBoardFixture();
+		const { store } = fx;
+		seedSwarm(store);
+		const hidden = store.append("bob", "ui detail");
+		expect(hidden.channel).toBe("ui");
+		expect(store.hasPending("carol", 0, false)).toBe(false);
+		expect(store.hasPending("bob", 0, false)).toBe(false);
+		expect(store.hasPending("coordinator", 0, false)).toBe(true);
+		expectRefusal(() => store.hasPending("alice", -1, false), /nonnegative/);
+	});
+});

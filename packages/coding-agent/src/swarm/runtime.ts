@@ -804,9 +804,12 @@ export class SwarmRuntime implements SwarmApi {
 		const post = this.append(actor.id, actor.name, text, channel);
 		const receipts = this.#wakeWaiters(board, post);
 		const settled = new Set(receipts.map(receipt => receipt.name));
+		// The author never rings itself: a brief that quotes `@coordinator` or an `@all` reaches everyone else.
 		const targets = board
 			.listMembers()
-			.filter(member => board.addresses(post, member.name) && !settled.has(member.name));
+			.filter(
+				member => member.name !== actor.name && board.addresses(post, member.name) && !settled.has(member.name),
+			);
 		receipts.push(
 			...(await Promise.all(
 				targets.map(async (member): Promise<SwarmDeliveryReceipt> => {
@@ -974,6 +977,7 @@ export class SwarmRuntime implements SwarmApi {
 			if (
 				waiter.swarmId !== board.metadata.id ||
 				post.seq <= waiter.since ||
+				post.agent === waiter.name ||
 				this.#closing.has(waiter.agentId) ||
 				board.member(waiter.name).killed ||
 				!board.visible(post, waiter.name) ||
