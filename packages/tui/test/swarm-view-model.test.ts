@@ -465,12 +465,12 @@ describe("parseNarratorView", () => {
 		});
 
 		it("accepts a plain https URL with a port, path and query", () => {
-			const action = { type: "url", target: "https://example.com:8443/a/b?c=d", label: "Deep link" };
+			const action = { type: "url", target: "https://example.com:8443/a/b?c=d", label: "Deep link" } as const;
 			expect(parseNarratorView(withAttention({ actions: [action] })).attention[0].actions).toEqual([action]);
 		});
 
 		it("accepts url schemes in any letter case", () => {
-			const action = { type: "url", target: "HTTPS://Example.com/", label: "Shouting" };
+			const action = { type: "url", target: "HTTPS://Example.com/", label: "Shouting" } as const;
 			expect(parseNarratorView(withAttention({ actions: [action] })).attention[0].actions).toEqual([action]);
 		});
 

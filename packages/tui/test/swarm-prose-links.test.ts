@@ -112,14 +112,19 @@ describe("board links in assistant prose", () => {
 		expect(JSON.stringify(first)).toContain(`swarm-board:${URL}`);
 		expect(JSON.stringify(first)).not.toContain("file:///tmp/board.snapshot.md");
 		expect(component.describe(CX)).toBe(first);
-		component.handleNativeEvent({ type: "action", key: "t0.board.1", act: `swarm-board:${URL}` });
+		component.handleNativeEvent({ type: "action", key: "t0.board.1", act: `swarm-board:${URL}`, mods: [] });
 		expect(clicked).toHaveBeenCalledWith({ act: "swarm-board", url: URL });
-		component.handleNativeEvent({ type: "action", key: "t0.board.1", act: "swarm-board:swarm://unrendered" });
+		component.handleNativeEvent({
+			type: "action",
+			key: "t0.board.1",
+			act: "swarm-board:swarm://unrendered",
+			mods: [],
+		});
 		expect(clicked).toHaveBeenCalledTimes(1);
 		setExtensionLinks([]);
 		const disabled = component.describe(CX);
 		expect(JSON.stringify(disabled)).not.toContain(`swarm-board:${URL}`);
-		component.handleNativeEvent({ type: "action", key: "t0.board.1", act: `swarm-board:${URL}` });
+		component.handleNativeEvent({ type: "action", key: "t0.board.1", act: `swarm-board:${URL}`, mods: [] });
 		expect(clicked).toHaveBeenCalledTimes(1);
 	});
 });

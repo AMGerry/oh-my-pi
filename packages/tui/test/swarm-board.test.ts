@@ -702,6 +702,7 @@ describe("overview evidence", () => {
 		const overlay = new Harness(overviewState({ view })).open({ initialTab: "overview" });
 		const text = visible(overlay.render(80));
 		expect(text.split(VIEW.headline)).toHaveLength(2);
+		if (VIEW.running_summary === undefined) throw new Error("The fixture view carries a running summary");
 		expect(text).toContain(VIEW.running_summary);
 		if (includeGoal) expect(text).toContain("Board lands after review.");
 		expect(JSON.stringify(overlay.describe(cx))).toContain(VIEW.headline);
@@ -1367,7 +1368,7 @@ describe("custom narrator page entry", () => {
 		overlay.showTab("overview");
 		expect(visible(overlay.render(80))).toContain("o Page");
 		overlay.handleInput("o");
-		overlay.handleNativeEvent({ type: "action", key: "custom-page", act: "custom-page" });
+		overlay.handleNativeEvent({ type: "action", key: "custom-page", act: "custom-page", mods: [] });
 		expect(requested).toHaveBeenCalledTimes(2);
 		expect(nodes(overlay.describe(cx)).some(item => clickAct(item) === "custom-page")).toBe(true);
 		h.publish(overviewState({ customPageError: "view.html is empty" }));
