@@ -304,6 +304,8 @@ export class SwarmRuntime implements SwarmApi {
 		if (this.#waiters.has(`${id}:${member.agentId}`) || this.#quota.has(member.agentId)) return "waiting";
 		const ref = this.registry.get(member.agentId);
 		if (ref?.sessionFile && member.sessionFile && ref.sessionFile !== member.sessionFile) return "stopped";
+		// A root session is registered as running for its whole life; its live run tells work from idle.
+		if (ref?.kind === "main") return ref.session?.isStreaming ? "working" : "stopped";
 		return ref?.status === "running" ? "working" : "stopped";
 	}
 

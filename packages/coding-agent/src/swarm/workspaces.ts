@@ -61,6 +61,15 @@ export async function createMemberWorkspace(
 	);
 }
 
+/** The file's bytes, or undefined when the path holds no readable file. */
+async function workingFile(file: string): Promise<Buffer | undefined> {
+	try {
+		return await fs.readFile(file);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Verify the owned checkout and its landed changes; `remove` then deletes the working copy. */
 async function settleMemberWorkspace(
 	swarmDir: string,
@@ -87,7 +96,25 @@ async function settleMemberWorkspace(
 		throw new SwarmRefusal(`Workspace ${name} belongs to a different repository`);
 	}
 	return withRepoLock(workspaceSource, async () => {
-		if (await worker.isDirty()) throw new SwarmRefusal(`Land ${name}'s working changes before killing it`);
+		// A workspace starts with the adder's open changes. An open path counts as landed when the coordinator's
+		// working copy holds the same bytes, or the path is gone from both.
+		const status = await worker.statusPorcelain({ untracked: "all", nulTerminated: true });
+		const fields = status.split("\0").filter(field => field !== "");
+		const open: string[] = [];
+		for (let index = 0; index < fields.length; index++) {
+			const field = fields[index];
+			open.push(field.slice(3));
+			// A rename or copy entry is followed by its original path.
+			if (field[0] === "R" || field[0] === "C") open.push(fields[++index]);
+		}
+		for (const file of open) {
+			const [mine, landed] = await Promise.all([
+				workingFile(path.join(actual, file)),
+				workingFile(path.join(workspaceSource, file)),
+			]);
+			if (mine === undefined ? landed !== undefined : landed === undefined || !mine.equals(landed))
+				throw new SwarmRefusal(`Land ${name}'s working changes before killing it: ${file}`);
+		}
 		if ((await worker.currentBranch()) !== workspaceBranch) {
 			throw new SwarmRefusal(`Restore ${name}'s workspace branch before killing it`);
 		}
@@ -107,7 +134,9 @@ async function settleMemberWorkspace(
 			}
 		}
 		if (!remove) return {};
-		if (!(await source.worktreeRemove(actual, false))) throw new SwarmRefusal(`Git retained ${name}'s working copy`);
+		// Open paths proven identical in the coordinator's copy leave with the working copy.
+		if (!(await source.worktreeRemove(actual, open.length > 0)))
+			throw new SwarmRefusal(`Git retained ${name}'s working copy`);
 		// A merge permits deletion; a cherry-pick keeps the original commit reference available.
 		try {
 			if (await source.deleteBranch(workspaceBranch, false)) return {};

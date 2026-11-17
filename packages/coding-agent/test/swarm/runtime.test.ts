@@ -6,6 +6,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { SWARM_WAIT_DISCONNECTED, type SwarmActor } from "../../src/swarm/api";
 import { BoardStore } from "../../src/swarm/board-store";
 import { SwarmRuntime } from "../../src/swarm/runtime";
@@ -245,5 +246,84 @@ describe("swarm runtime waiting and delivery", () => {
 		const retried = await f.runtime.wait(f.actor("alice"), { since: 0 });
 		expect(retried.messages[0]?.text).toBe("@alice retained assignment");
 		expect(retried.lastReadSeq).toBe(1);
+	});
+});
+
+describe("swarm member state", () => {
+	it("reads a root coordinator from its live run, whatever its registry status says", async () => {
+		const f = fixture();
+		const id = f.board.metadata.id;
+		// The registry keeps a root session `running` for its whole life.
+		expect(f.registry.get("Main")).toMatchObject({ kind: "main", status: "running" });
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
+
+		const run = { isStreaming: false };
+		f.registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: run as unknown as AgentSessionHandle,
+			status: "running",
+		});
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
+		run.isStreaming = true;
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "working" });
+		run.isStreaming = false;
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
+
+		// Parked on the board, the coordinator reads waiting even while its turn is open; the turn alone decides afterwards.
+		run.isStreaming = true;
+		const park = new AbortController();
+		const parked = f.runtime.wait(f.coordinator, { since: 0 }, park.signal);
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "waiting" });
+		park.abort();
+		await parked;
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "working" });
+		run.isStreaming = false;
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
+	});
+
+	it("reads a coordinator that is parked on the board as waiting when it has no live session", async () => {
+		const f = fixture();
+		const park = new AbortController();
+		const parked = f.runtime.wait(f.coordinator, { since: 0 }, park.signal);
+		expect(f.runtime.snapshot(f.board.metadata.id).members[0]).toMatchObject({
+			name: "coordinator",
+			state: "waiting",
+		});
+		park.abort();
+		await parked;
+		expect(f.runtime.snapshot(f.board.metadata.id).members[0]).toMatchObject({
+			name: "coordinator",
+			state: "stopped",
+		});
+	});
+
+	it("keeps reading a worker from its registry status", () => {
+		const f = fixture();
+		const id = f.board.metadata.id;
+		const quiet = { isStreaming: false } as unknown as AgentSessionHandle;
+		const refs = [
+			["alice", "running", quiet],
+			["bob", "idle", null],
+			["monitor", "parked", null],
+		] as const;
+		for (const [name, status, session] of refs) {
+			f.registry.register({
+				id: `Member-${name}`,
+				displayName: name,
+				kind: "sub",
+				parentId: "Main",
+				session,
+				status,
+			});
+		}
+		// A worker is working while its ref is running, whether or not a stream is open, and stopped when idle or parked.
+		expect(f.runtime.snapshot(id).members.map(member => [member.name, member.state])).toEqual([
+			["coordinator", "stopped"],
+			["alice", "working"],
+			["bob", "stopped"],
+			["monitor", "stopped"],
+		]);
 	});
 });

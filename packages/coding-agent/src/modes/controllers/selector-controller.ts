@@ -2702,6 +2702,7 @@ export class SelectorController {
 							onNavigate: action => this.#navigateSwarm(source, action),
 						});
 						openPath(this.#swarmPage.url);
+						this.ctx.showStatus(`Custom page: ${this.#swarmPage.url}`);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}

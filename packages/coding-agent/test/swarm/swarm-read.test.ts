@@ -137,7 +137,7 @@ describe("swarm_read status", () => {
 		expect(text).not.toContain('"messages"');
 		const roster = parseRoster(text);
 		expect(roster.map(row => row.Member)).toEqual(["coordinator (you)", "alice", "bob"]);
-		expect(roster[0]).toMatchObject({ Role: "coordinator", State: "working", Read: "#0", Unread: "2" });
+		expect(roster[0]).toMatchObject({ Role: "coordinator", State: "stopped", Read: "#0", Unread: "2" });
 		expect(roster[1]).toMatchObject({
 			Role: "worker",
 			State: "working",

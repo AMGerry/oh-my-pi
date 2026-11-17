@@ -3,7 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isMainThread } from "node:worker_threads";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import { artifactsDirsFromRegistry } from "../internal-urls/registry-helpers";
+import { sessionDirForCwd } from "../session/session-paths";
 import { BoardStore } from "./board-store";
 import { formatRoster } from "./format";
 import { SwarmRuntime } from "./runtime";
@@ -144,6 +146,38 @@ function discover(options: SwarmSurfaceOptions): Discovery {
 		candidates.push({ dir: key, live: live.get(key) });
 	}
 	return { candidates, runtime };
+}
+
+/**
+ * Board directories kept in the artifacts of saved sessions: the sessions of the project at `cwd`, or of every
+ * project when `cwd` is omitted.
+ */
+export function savedBoardDirectories(cwd?: string, sessionsRoot: string = getSessionsDir()): string[] {
+	let projects: string[];
+	if (cwd !== undefined) {
+		projects = [sessionDirForCwd(cwd, sessionsRoot)];
+	} else {
+		try {
+			projects = fs.readdirSync(sessionsRoot).map(name => path.join(sessionsRoot, name));
+		} catch {
+			return [];
+		}
+	}
+	const boards: string[] = [];
+	for (const project of projects) {
+		let sessions: fs.Dirent[];
+		try {
+			sessions = fs.readdirSync(project, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const session of sessions) {
+			if (!session.isDirectory()) continue;
+			const dir = path.join(project, session.name, "swarm");
+			if (fs.existsSync(path.join(dir, "swarm.json"))) boards.push(dir);
+		}
+	}
+	return boards;
 }
 
 /** The swarm id recorded in a candidate, read from `swarm.json` alone; undefined when that file is unusable. */

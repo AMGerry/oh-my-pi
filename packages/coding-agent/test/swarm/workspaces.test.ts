@@ -86,7 +86,9 @@ test("dirty workspace bytes and an unrelated checkout survive a refused kill", a
 	const workspace = await createMemberWorkspace(cwd, cwd, dir, "test", "alice");
 	const member = makeMember("alice", { workspace: "branch", ...workspace });
 	await fs.writeFile(path.join(workspace.workspacePath, "draft.txt"), "unique work\n");
-	await expect(removeMemberWorkspace(dir, "test", "alice", member)).rejects.toThrow("working changes");
+	await expect(removeMemberWorkspace(dir, "test", "alice", member)).rejects.toThrow(
+		"working changes before killing it: draft.txt",
+	);
 	await expect(removeMemberWorkspace(dir, "test", "alice", { ...member, workspacePath: cwd })).rejects.toThrow(
 		"ownership",
 	);
@@ -196,7 +198,7 @@ test("a kill refused for open changes or an unlanded branch leaves the member un
 	await fs.writeFile(draft, "unique work\n");
 	const dirty = f.runtime.kill(f.actor, "alice");
 	await expect(dirty).rejects.toBeInstanceOf(SwarmRefusal);
-	await expect(dirty).rejects.toThrow("Land alice's working changes");
+	await expect(dirty).rejects.toThrow("Land alice's working changes before killing it: draft.txt");
 	await f.standing(["alice"]);
 	expect(await fs.readFile(draft, "utf8")).toBe("unique work\n");
 	expect(f.clock.pending.size).toBe(1);
@@ -241,7 +243,7 @@ test("one unclean member refuses the kill of its whole group and leaves every me
 
 	const refused = f.runtime.kill(f.actor, "team");
 	await expect(refused).rejects.toBeInstanceOf(SwarmRefusal);
-	await expect(refused).rejects.toThrow("Land team-2's working changes");
+	await expect(refused).rejects.toThrow("Land team-2's working changes before killing it: draft.txt");
 	await f.standing(["team-1", "team-2"]);
 	expect(await fs.readFile(draft, "utf8")).toBe("unique work\n");
 	expect(f.runtime.scheduler.list(f.actor)).toHaveLength(2);
@@ -281,4 +283,138 @@ test("a working copy refused for removal after the stop is reported as retained,
 	await expect(fs.stat(alice.workspacePath!)).resolves.toBeDefined();
 	expect(await f.repo.refExists(`swarm/${f.actor.id}/alice`)).toBe(true);
 	expect(await f.repo.worktrees()).toHaveLength(2);
+}, 60_000);
+
+/** Run Git in `cwd` and return its standard output. */
+async function runGit(cwd: string, ...args: string[]): Promise<string> {
+	const child = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", windowsHide: true });
+	const [code, output, error] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${error || output}`);
+	return output;
+}
+
+const LEXER = "export const lexer = 1;\n";
+
+/** The adder's open work, which every member workspace starts with: an untracked file and a modified tracked file. */
+async function openAdderWork(cwd: string): Promise<void> {
+	await fs.mkdir(path.join(cwd, "src"));
+	await fs.writeFile(path.join(cwd, "src", "lexer.js"), LEXER);
+	await fs.writeFile(path.join(cwd, "base.txt"), "edited\n");
+}
+
+test("a workspace that starts with the adder's open files is verified and killed once the member's own commit has landed by merge", async () => {
+	const f = await swarmFixture();
+	await openAdderWork(f.cwd);
+	const open = await f.repo.statusPorcelain({ untracked: "all" });
+	await f.runtime.add(f.caller, { action: "add", name: "alice", brief: "Work", workspace: "share" }, f.prepare);
+	const board = f.runtime.board(f.actor.id);
+	const alice = board.member("alice");
+	const branch = `swarm/${f.actor.id}/alice`;
+	expect(await fs.readFile(path.join(alice.workspacePath!, "src", "lexer.js"), "utf8")).toBe(LEXER);
+	expect(await fs.readFile(path.join(alice.workspacePath!, "base.txt"), "utf8")).toBe("edited\n");
+
+	// The member commits its own file; the carried files stay open in its working copy.
+	const worker = vcs.requireGit(alice.workspacePath!);
+	await fs.writeFile(path.join(alice.workspacePath!, "member.txt"), "member work\n");
+	await worker.stageFiles(["member.txt"]);
+	await worker.commitCreate("alice work", { files: ["member.txt"] });
+	await expect(workspaces.verifyMemberWorkspace(board.dir, f.actor.id, "alice", alice)).rejects.toThrow(
+		`Land ${branch} in the coordinator's branch`,
+	);
+
+	// The coordinator merges it and keeps its own open files as they were.
+	await runGit(f.cwd, "merge", "--no-edit", branch);
+	await expect(workspaces.verifyMemberWorkspace(board.dir, f.actor.id, "alice", alice)).resolves.toBeUndefined();
+	await expect(fs.stat(alice.workspacePath!)).resolves.toBeDefined();
+
+	const result = await f.runtime.kill(f.actor, "alice");
+	expect(result.killed).toEqual(["alice"]);
+	expect(result.retainedBranches).toBeUndefined();
+	expect(result.retainedWorkspaces).toBeUndefined();
+	await expect(fs.stat(alice.workspacePath!)).rejects.toMatchObject({ code: "ENOENT" });
+	expect(await f.repo.worktrees()).toHaveLength(1);
+	expect(await f.repo.refExists(branch)).toBe(false);
+	expect(await f.repo.statusPorcelain({ untracked: "all" })).toBe(open);
+	expect(await fs.readFile(path.join(f.cwd, "src", "lexer.js"), "utf8")).toBe(LEXER);
+	expect(await fs.readFile(path.join(f.cwd, "base.txt"), "utf8")).toBe("edited\n");
+	expect(await fs.readFile(path.join(f.cwd, "member.txt"), "utf8")).toBe("member work\n");
+}, 60_000);
+
+test("a carried file the member changed refuses the kill with exactly that path and leaves the workspace as it was", async () => {
+	const f = await swarmFixture();
+	await openAdderWork(f.cwd);
+	await f.runtime.add(f.caller, { action: "add", name: "alice", brief: "Work", workspace: "share" }, f.prepare);
+	await f.schedule(["alice"]);
+	const alice = f.runtime.board(f.actor.id).member("alice");
+	const changed = "export const lexer = 2;\n";
+	const lexer = path.join(alice.workspacePath!, "src", "lexer.js");
+	await fs.writeFile(lexer, changed);
+
+	const refused = f.runtime.kill(f.actor, "alice");
+	await expect(refused).rejects.toBeInstanceOf(SwarmRefusal);
+	await expect(refused).rejects.toMatchObject({
+		message: "Land alice's working changes before killing it: src/lexer.js",
+	});
+	await f.standing(["alice"]);
+	expect(await fs.readFile(lexer, "utf8")).toBe(changed);
+	expect(await fs.readFile(path.join(alice.workspacePath!, "base.txt"), "utf8")).toBe("edited\n");
+	expect(await fs.readFile(path.join(f.cwd, "src", "lexer.js"), "utf8")).toBe(LEXER);
+
+	// Landed by hand: the coordinator now holds the member's bytes.
+	await fs.writeFile(path.join(f.cwd, "src", "lexer.js"), changed);
+	expect((await f.runtime.kill(f.actor, "alice")).killed).toEqual(["alice"]);
+	await expect(fs.stat(alice.workspacePath!)).rejects.toMatchObject({ code: "ENOENT" });
+	expect(await fs.readFile(path.join(f.cwd, "src", "lexer.js"), "utf8")).toBe(changed);
+}, 60_000);
+
+test("a carried file the member deleted refuses the kill while the coordinator still holds it, and counts as landed once both lack it", async () => {
+	const f = await swarmFixture();
+	await openAdderWork(f.cwd);
+	await f.runtime.add(f.caller, { action: "add", name: "alice", brief: "Work", workspace: "share" }, f.prepare);
+	await f.schedule(["alice"]);
+	const alice = f.runtime.board(f.actor.id).member("alice");
+	await fs.rm(path.join(alice.workspacePath!, "base.txt"));
+
+	const refused = f.runtime.kill(f.actor, "alice");
+	await expect(refused).rejects.toBeInstanceOf(SwarmRefusal);
+	await expect(refused).rejects.toMatchObject({ message: "Land alice's working changes before killing it: base.txt" });
+	await f.standing(["alice"]);
+	expect(await fs.readFile(path.join(f.cwd, "base.txt"), "utf8")).toBe("edited\n");
+
+	// The path is gone on both sides.
+	await fs.rm(path.join(f.cwd, "base.txt"));
+	expect((await f.runtime.kill(f.actor, "alice")).killed).toEqual(["alice"]);
+	await expect(fs.stat(alice.workspacePath!)).rejects.toMatchObject({ code: "ENOENT" });
+	await expect(fs.stat(path.join(f.cwd, "base.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+	expect(await fs.readFile(path.join(f.cwd, "src", "lexer.js"), "utf8")).toBe(LEXER);
+}, 60_000);
+
+test("new uncommitted work counts as landed once the coordinator's working copy holds the same bytes", async () => {
+	const f = await swarmFixture();
+	await f.runtime.add(f.caller, { action: "add", name: "alice", brief: "Work", workspace: "share" }, f.prepare);
+	await f.schedule(["alice"]);
+	const alice = f.runtime.board(f.actor.id).member("alice");
+	const branch = `swarm/${f.actor.id}/alice`;
+	await fs.writeFile(path.join(alice.workspacePath!, "work.txt"), "new work\n");
+	const message = "Land alice's working changes before killing it: work.txt";
+
+	// Missing from the coordinator, then present with other bytes.
+	await expect(f.runtime.kill(f.actor, "alice")).rejects.toMatchObject({ message });
+	await fs.writeFile(path.join(f.cwd, "work.txt"), "another version\n");
+	await expect(f.runtime.kill(f.actor, "alice")).rejects.toMatchObject({ message });
+	await f.standing(["alice"]);
+	expect(await fs.readFile(path.join(alice.workspacePath!, "work.txt"), "utf8")).toBe("new work\n");
+
+	// Copied byte for byte.
+	await fs.writeFile(path.join(f.cwd, "work.txt"), "new work\n");
+	const result = await f.runtime.kill(f.actor, "alice");
+	expect(result.killed).toEqual(["alice"]);
+	expect(result.retainedBranches).toBeUndefined();
+	await expect(fs.stat(alice.workspacePath!)).rejects.toMatchObject({ code: "ENOENT" });
+	expect(await f.repo.refExists(branch)).toBe(false);
+	expect(await fs.readFile(path.join(f.cwd, "work.txt"), "utf8")).toBe("new work\n");
 }, 60_000);

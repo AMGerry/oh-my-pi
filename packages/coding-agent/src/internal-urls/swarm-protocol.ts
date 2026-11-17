@@ -24,6 +24,8 @@ import {
 	renderSwarmIndex,
 	renderSwarmSnapshot,
 	type SwarmSurfaceOptions,
+	savedBoardDirectories,
+	type SwarmSurface,
 	writeSwarmSnapshotFile,
 } from "../swarm/surface";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
@@ -57,6 +59,31 @@ function surfaceOptions(context: ResolveContext | undefined): SwarmSurfaceOption
 	return { ...(artifactsDir ? { artifactsDir } : {}), directories };
 }
 
+/** Project whose saved sessions join the board discovery. */
+function boardCwd(context: ResolveContext | undefined): string {
+	return context?.cwd ?? context?.session?.cwd ?? process.cwd();
+}
+
+/**
+ * The board with this id: from the session's own discovery, then from the saved sessions of its project, then
+ * from the saved sessions of every project.
+ */
+function findSavedSurface(
+	id: string,
+	options: SwarmSurfaceOptions,
+	context: ResolveContext | undefined,
+): SwarmSurface | undefined {
+	const directories = options.directories ?? [];
+	return (
+		findSwarmSurface(id, options) ??
+		findSwarmSurface(id, {
+			...options,
+			directories: [...directories, ...savedBoardDirectories(boardCwd(context))],
+		}) ??
+		findSwarmSurface(id, { ...options, directories: [...directories, ...savedBoardDirectories()] })
+	);
+}
+
 function presented(error: unknown): ToolError {
 	if (error instanceof ToolError) return error;
 	return new ToolError(error instanceof Error ? error.message : String(error));
@@ -83,8 +110,16 @@ export class SwarmProtocolHandler implements ProtocolHandler {
 			const options = surfaceOptions(context);
 			const content =
 				target.id === undefined
-					? renderSwarmIndex(listSwarmSurfaces(options))
-					: renderSwarmSnapshot(getSwarmSurface(target.id, options), target.since);
+					? renderSwarmIndex(
+							listSwarmSurfaces({
+								...options,
+								directories: [...(options.directories ?? []), ...savedBoardDirectories(boardCwd(context))],
+							}),
+						)
+					: renderSwarmSnapshot(
+							findSavedSurface(target.id, options, context) ?? getSwarmSurface(target.id, options),
+							target.since,
+						);
 			return {
 				url: formatSwarmUrl(target),
 				content,
@@ -104,7 +139,7 @@ export class SwarmProtocolHandler implements ProtocolHandler {
 		try {
 			const target = parseSwarmUrl(url.rawHref ?? url.href);
 			if (target.id === undefined) return null;
-			const surface = findSwarmSurface(target.id, surfaceOptions(context));
+			const surface = findSavedSurface(target.id, surfaceOptions(context), context);
 			return surface ? (writeSwarmSnapshotFile(surface, target.since) ?? null) : null;
 		} catch (error) {
 			throw presented(error);

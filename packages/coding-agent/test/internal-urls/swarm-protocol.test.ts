@@ -2,10 +2,11 @@
  * swarm:// is the read-only window onto shared-board swarms. Boards come from real directories: persisted ones render
  * read-only from disk, boards a runtime holds open render live, and a board that cannot be read never hides the others.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Settings } from "../../src/config/settings";
@@ -14,6 +15,7 @@ import { registerArtifactsDir, resetRegisteredArtifactDirsForTests } from "../..
 import type { SchemeHost } from "../../src/internal-urls/types";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { sessionDirForCwd } from "../../src/session/session-paths";
 import { BoardStore } from "../../src/swarm/board-store";
 import { SwarmRuntime } from "../../src/swarm/runtime";
 import {
@@ -23,6 +25,7 @@ import {
 	listSwarmSurfaces,
 	parseSwarmUrl,
 	renderSwarmSnapshot,
+	savedBoardDirectories,
 	type SwarmUrlTarget,
 	writeSwarmSnapshotFile,
 } from "../../src/swarm/surface";
@@ -43,9 +46,19 @@ import { parseRoster } from "../swarm/tool-fixture";
 
 const temporaryDirs: string[] = [];
 const cleanups: Array<() => Promise<void> | void> = [];
+let originalAgentDir: string;
+
+// Saved sessions are discovered under the agent directory's sessions root; every test sees an empty, private one.
+beforeEach(() => {
+	originalAgentDir = getAgentDir();
+	const agentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-swarm-agent-"));
+	temporaryDirs.push(agentRoot);
+	setAgentDir(path.join(agentRoot, "agent"));
+});
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	setAgentDir(originalAgentDir);
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	InternalUrlRouter.resetForTests();
 	SwarmRuntime.resetGlobalForTests();
@@ -553,10 +566,10 @@ describe("live boards", () => {
 		const live = getSwarmSurface("live-swarm", { artifactsDir: root, runtime });
 		expect(live.board).toBe(board);
 		expect(live.board.readOnly).toBe(false);
-		expect(live.snapshot.members[0]).toMatchObject({ name: "coordinator", state: "working" });
+		expect(live.snapshot.members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
 		const liveText = renderSwarmSnapshot(live);
 		expect(liveText).toContain("Access: live board owned by this process.");
-		expect(parseRoster(liveText)[0].State).toBe("working");
+		expect(parseRoster(liveText)[0].State).toBe("stopped");
 
 		const persisted = getSwarmSurface("live-swarm", { artifactsDir: root, runtime: createRuntime() });
 		expect(persisted.board).not.toBe(board);
@@ -681,5 +694,157 @@ describe("refused reads", () => {
 		await expect(result).rejects.toBeInstanceOf(ToolError);
 		await expect(result).rejects.toThrow(reason);
 		expect(fx.listFiles()).toEqual([...BOARD_FILES].sort());
+	});
+});
+
+describe("boards of saved sessions", () => {
+	function projectDir(): string {
+		const project = path.join(temporaryDir(), "project");
+		fs.mkdirSync(project);
+		return project;
+	}
+
+	/** A saved session of the project at `project`: its transcript file and, beside it, its artifacts with a board. */
+	function savedBoard(project: string, id: string, title: string): string {
+		const bucket = sessionDirForCwd(project);
+		const session = `2026-01-01T00-00-00-000Z_${id}`;
+		fs.mkdirSync(path.join(bucket, session), { recursive: true });
+		fs.writeFileSync(path.join(bucket, `${session}.jsonl`), "");
+		const dir = path.join(bucket, session, "swarm");
+		const store = BoardStore.create(dir, {
+			id,
+			title,
+			coordinator: makeMember(`${id}-coordinator`, { role: "coordinator", wakeMode: null }),
+			capabilities: SWARM_CAPABILITIES,
+		});
+		store.append("coordinator", "Saved evidence");
+		return dir;
+	}
+
+	it("renders a saved session's board for a caller without a session or artifacts directory, and lists it in the index", async () => {
+		const project = projectDir();
+		const dir = savedBoard(project, "saved-swarm", "Saved team");
+		const before = fs.readdirSync(dir).sort();
+
+		const resource = await router().resolve("swarm://saved-swarm", { cwd: project });
+		expect(resource.url).toBe("swarm://saved-swarm");
+		expect(resource.contentType).toBe("text/markdown");
+		expect(resource.content).toContain("# Swarm Saved team (saved-swarm)");
+		expect(resource.content).toContain("Access: read-only copy");
+		expect(headings(resource.content)).toHaveLength(1);
+		expect(resource.content).toContain("> Saved evidence");
+
+		const index = (await router().resolve("swarm://", { cwd: project })).content;
+		expect(index).toMatch(/\| swarm:\/\/saved-swarm \| Saved team \| #1 \| 1 stopped \| read-only \|/);
+		expect(fs.readdirSync(dir).sort()).toEqual(before);
+		expect(before).toEqual([...BOARD_FILES].sort());
+	});
+
+	it("finds the board from another project through every project's sessions, which that project's index does not list", async () => {
+		const project = projectDir();
+		const elsewhere = projectDir();
+		savedBoard(project, "saved-swarm", "Saved team");
+
+		const resource = await router().resolve("swarm://saved-swarm", { cwd: elsewhere });
+		expect(resource.content).toContain("# Swarm Saved team (saved-swarm)");
+
+		const index = (await router().resolve("swarm://", { cwd: elsewhere })).content;
+		expect(index).not.toContain("swarm://saved-swarm");
+		expect(index).toContain("A board appears here once a coordinator session creates its team");
+	});
+
+	it("prefers the caller's own project when two saved boards share an id", async () => {
+		const alpha = projectDir();
+		const bravo = projectDir();
+		savedBoard(alpha, "shared-swarm", "Alpha team");
+		savedBoard(bravo, "shared-swarm", "Bravo team");
+		expect((await router().resolve("swarm://shared-swarm", { cwd: alpha })).content).toContain("Alpha team");
+		expect((await router().resolve("swarm://shared-swarm", { cwd: bravo })).content).toContain("Bravo team");
+	});
+
+	it("locates a saved board's snapshot file beside its records, from its own project and from another", async () => {
+		const project = projectDir();
+		const elsewhere = projectDir();
+		const dir = savedBoard(project, "saved-swarm", "Saved team");
+		const expected = path.join(fs.realpathSync.native(dir), "board.snapshot.md");
+
+		expect(await router().locate("swarm://saved-swarm", { cwd: project })).toBe(expected);
+		expect(fs.readFileSync(expected, "utf8")).toBe(
+			(await router().resolve("swarm://saved-swarm", { cwd: project })).content,
+		);
+		expect(await router().locate("swarm://saved-swarm", { cwd: elsewhere })).toBe(expected);
+		expect(fs.readdirSync(dir).sort()).toEqual([...BOARD_FILES, "board.snapshot.md"].sort());
+	});
+
+	it("still refuses an id that no discovered or saved board holds, naming the boards it knows", async () => {
+		using fx = seededFixture();
+		const project = projectDir();
+		savedBoard(project, "saved-swarm", "Saved team");
+		const caller = { ...context(fx.root), cwd: project };
+
+		expect((await router().resolve("swarm://saved-swarm", caller)).content).toContain("Saved team");
+		const unknown = router().resolve("swarm://nothing-here", caller);
+		await expect(unknown).rejects.toBeInstanceOf(ToolError);
+		await expect(unknown).rejects.toThrow(/Unknown swarm: nothing-here\. Known swarms: test-swarm/);
+		expect(await router().locate("swarm://nothing-here", caller)).toBeNull();
+	});
+});
+
+describe("savedBoardDirectories", () => {
+	function boardAt(dir: string, id: string): string {
+		BoardStore.create(dir, {
+			id,
+			title: id,
+			coordinator: makeMember(`${id}-coordinator`, { role: "coordinator", wakeMode: null }),
+			capabilities: SWARM_CAPABILITIES,
+		});
+		return dir;
+	}
+
+	it("lists the boards of the project's saved sessions, or of every project's, and nothing else", () => {
+		const root = temporaryDir();
+		const alphaCwd = path.join(root, "alpha-project");
+		const bravoCwd = path.join(root, "bravo-project");
+		const alpha = sessionDirForCwd(alphaCwd, root);
+		const bravo = sessionDirForCwd(bravoCwd, root);
+		const first = boardAt(path.join(alpha, "session-one", "swarm"), "alpha-one");
+		const second = boardAt(path.join(alpha, "session-two", "swarm"), "alpha-two");
+		const third = boardAt(path.join(bravo, "session-three", "swarm"), "bravo-one");
+		// None of these is a board: a swarm directory without swarm.json, a session without one, and files where
+		// directories belong (a transcript, a file named like a session, a swarm file, a stray file in the root).
+		fs.mkdirSync(path.join(alpha, "session-four", "swarm"), { recursive: true });
+		fs.writeFileSync(path.join(alpha, "session-four", "swarm", "board.jsonl"), "");
+		fs.mkdirSync(path.join(alpha, "session-five"), { recursive: true });
+		fs.writeFileSync(path.join(alpha, "session-six.jsonl"), "");
+		fs.writeFileSync(path.join(alpha, "session-seven"), "a file named like a session");
+		fs.mkdirSync(path.join(alpha, "session-eight"), { recursive: true });
+		fs.writeFileSync(path.join(alpha, "session-eight", "swarm"), "a file named swarm");
+		fs.writeFileSync(path.join(root, "stray.txt"), "");
+
+		expect(savedBoardDirectories(alphaCwd, root).sort()).toEqual([first, second].sort());
+		expect(savedBoardDirectories(bravoCwd, root)).toEqual([third]);
+		expect(savedBoardDirectories(undefined, root).sort()).toEqual([first, second, third].sort());
+		expect(savedBoardDirectories(path.join(root, "unknown-project"), root)).toEqual([]);
+	});
+
+	it("returns an empty list for a missing sessions root and for a project without sessions", () => {
+		const root = temporaryDir();
+		const absent = path.join(root, "absent");
+		expect(savedBoardDirectories(undefined, absent)).toEqual([]);
+		expect(savedBoardDirectories(path.join(root, "project"), absent)).toEqual([]);
+		expect(fs.existsSync(absent)).toBe(false);
+
+		fs.mkdirSync(sessionDirForCwd(path.join(root, "project"), root), { recursive: true });
+		expect(savedBoardDirectories(path.join(root, "project"), root)).toEqual([]);
+		expect(savedBoardDirectories(undefined, root)).toEqual([]);
+	});
+
+	it("reads the sessions root of the active agent directory by default", () => {
+		const project = path.join(temporaryDir(), "project");
+		fs.mkdirSync(project);
+		const bucket = sessionDirForCwd(project);
+		const dir = boardAt(path.join(bucket, "session-one", "swarm"), "default-root");
+		expect(savedBoardDirectories(project)).toEqual([dir]);
+		expect(savedBoardDirectories()).toEqual([dir]);
 	});
 });

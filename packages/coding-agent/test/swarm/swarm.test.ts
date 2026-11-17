@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -308,6 +309,36 @@ describe("native swarm control tool", () => {
 			status: "parked",
 			history: { agent: "swarm-member" },
 		});
+	});
+
+	it("reads the real coordinator as working during its own swarm call and as stopped once its turn has ended", async () => {
+		const f = await fixture();
+		// A root session stays registered as running for its whole life; only its live run tells work from idle.
+		f.registry.setStatus("Main", "running");
+		f.root.agent.setTools([f.tool]);
+		f.model.push({
+			content: [{ type: "toolCall", id: "own-status", name: "swarm", arguments: { action: "status" } }],
+		});
+		f.model.push({ content: ["The roster was read"] });
+
+		await f.root.prompt("Report the swarm", {
+			userInitiated: true,
+			runCommands: false,
+			expandPromptTemplates: false,
+		});
+		const called = f.root.messages.find(message => message.role === "toolResult" && message.toolName === "swarm");
+		if (called?.role !== "toolResult") throw new Error("Expected the swarm status result");
+		const rosterShape = type({ members: type({ name: "string", state: "string" }).array() });
+		const during = rosterShape.assert(
+			JSON.parse(called.content.map(part => (part.type === "text" ? part.text : "")).join("")),
+		);
+		expect(during.members.find(member => member.name === "coordinator")?.state).toBe("working");
+
+		// The turn is over; the registry still says running, the live run says stopped.
+		expect(f.root.isStreaming).toBe(false);
+		expect(f.registry.get("Main")?.status).toBe("running");
+		const board = f.runtime.list()[0]!;
+		expect(f.runtime.snapshot(board.metadata.id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
 	});
 
 	it("parks two native TaskTool conversations inside swarm_wait and resumes only the addressed member with its selected model", async () => {

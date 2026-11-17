@@ -10,7 +10,6 @@ import { IrcBus } from "../irc/bus";
 import { SwarmBoardSource } from "../modes/swarm-board-runtime";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import { SessionManager } from "../session/session-manager";
 import adaptation from "../skills/swarm-adaptation.json";
 import type { SwarmActor } from "../swarm/api";
 import { BoardStore } from "../swarm/board-store";
@@ -27,6 +26,7 @@ import {
 	parseSwarmUrl,
 	renderSwarmIndex,
 	renderSwarmSnapshot,
+	savedBoardDirectories,
 	type SwarmSurface,
 } from "../swarm/surface";
 import { type MemberRole, type SwarmMember, SwarmRefusal } from "../swarm/types";
@@ -50,14 +50,6 @@ export interface SelftestStep {
 const SWARM_TOOLS = ["swarm", "swarm_post", "swarm_read", "swarm_wait", "swarm_schedule"];
 const STEP_TIMEOUT_MS = 10_000;
 const MINUTE_MS = 60_000;
-
-/** Board directories of the saved sessions: the current project's, or every project's. */
-async function boardDirectories(cwd: string, all: boolean): Promise<string[]> {
-	const sessions = all ? await SessionManager.listAll() : await SessionManager.list(cwd);
-	return sessions
-		.filter(session => session.path.endsWith(".jsonl"))
-		.map(session => path.join(session.path.slice(0, -".jsonl".length), "swarm"));
-}
 
 function verify(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(message);
@@ -339,7 +331,7 @@ export async function runSwarmCommand(cmd: SwarmCommandArgs, cwd: string): Promi
 	}
 	if (cmd.action === "list") {
 		if (cmd.id !== undefined) throw new CliUsageError("usage: omp swarm list [--all] [--json]");
-		const surfaces = listSwarmSurfaces({ directories: await boardDirectories(cwd, cmd.flags.all) });
+		const surfaces = listSwarmSurfaces({ directories: savedBoardDirectories(cmd.flags.all ? undefined : cwd) });
 		process.stdout.write(
 			cmd.flags.json ? `${JSON.stringify(surfaces.map(surface => surface.snapshot))}\n` : renderSwarmIndex(surfaces),
 		);
@@ -348,7 +340,7 @@ export async function runSwarmCommand(cmd: SwarmCommandArgs, cwd: string): Promi
 	if (cmd.id === undefined) throw new CliUsageError("usage: omp swarm board <id> [--since <seq>] [--json]");
 	const since = cmd.flags.since ?? 0;
 	if (since < 0) throw new CliUsageError("--since takes a nonnegative sequence number");
-	const directories = await boardDirectories(cwd, true);
+	const directories = savedBoardDirectories();
 	let surface: SwarmSurface;
 	try {
 		surface = getSwarmSurface(cmd.id, { directories });
