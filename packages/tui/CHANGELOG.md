@@ -5,6 +5,9 @@
 ### Added
 
 - `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+- Added the swarm board overlay with Board, Members and Overview tabs, an unread divider, `#seq` and member citations as navigation, and the last good `view.json` and `plan.json` kept when an update is rejected
+- Added compact tool cards for `swarm`, `swarm_post`, `swarm_read`, `swarm_wait` and `swarm_schedule`
+- Added the `app.swarm.board` key action (default `Alt+B`) that opens the swarm board
 
 ### Fixed
 

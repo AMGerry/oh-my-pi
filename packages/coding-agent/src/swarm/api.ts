@@ -101,6 +101,8 @@ export interface SwarmReadResult extends BoardReadResult {
 }
 export interface SwarmWaitResult extends SwarmReadResult {
 	interrupted?: true;
+	/** The `swarm.wait.maxMs` limit ended the park. */
+	timedOut?: true;
 }
 export interface SwarmWaitSnapshot {
 	swarmId: string;
@@ -134,6 +136,8 @@ export interface SwarmControlResult extends SwarmSnapshot {
 	killed?: string[];
 	channels?: Record<string, SwarmChannel>;
 	retainedBranches?: string[];
+	/** Working copies of killed members that changed while the member stopped; they stay for landing by hand. */
+	retainedWorkspaces?: string[];
 }
 
 export type PrepareSwarmMember = (plan: SwarmLaunchPlan) => Promise<PreparedSwarmMember>;

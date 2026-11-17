@@ -63,3 +63,29 @@ export const cfgSwarmBoardMaxBytes = register({
 		})),
 	},
 });
+
+const WAIT_LIMITS: ReadonlyArray<readonly [number, string]> = [
+	[0, "Unlimited"],
+	[60_000, "1 minute"],
+	[300_000, "5 minutes"],
+	[900_000, "15 minutes"],
+	[3_600_000, "1 hour"],
+];
+
+export const cfgSwarmWaitMaxMs = register({
+	id: "swarm.wait.maxMs",
+	type: "number",
+	default: 0,
+	validate(value: unknown): void {
+		if (value === undefined) return;
+		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > 86_400_000)
+			throw new Error("swarm.wait.maxMs must be an integer between 0 and 86400000");
+	},
+	ui: {
+		tab: "tasks",
+		group: "Swarm",
+		label: "Wait Limit",
+		description: "Longest park of one swarm_wait call; Unlimited parks on board events alone",
+		options: WAIT_LIMITS.map(([value, label]) => ({ value: String(value), label })),
+	},
+});

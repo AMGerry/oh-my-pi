@@ -38,7 +38,7 @@ A member is an ordinary native subagent with an additional board record. Its com
 
 `inherit` uses the caller's working copy. `share` and `branch` give the member a native Git worktree on `swarm/<id>/<name>`, starting from the caller's working copy as it stands, uncommitted changes included. Landing precedes deletion: cleanup verifies a clean checkout and landed content. A retained branch reference is reported when Git still protects its commits.
 
-Kill disposes the native session, persists its tombstone and removes an eligible owned workspace. Helpers retain their independent lifetimes. After a restart, surviving member records restore as stopped native registrations with their saved conversations and cursors.
+Kill first checks every targeted workspace: a working copy with open changes or an unlanded branch refuses the kill and leaves the whole group running. Kill then disposes the native session, persists its tombstone and removes the owned workspace; `retainedBranches` lists branches kept for a cherry-picked landing, and `retainedWorkspaces` lists working copies that changed while their member stopped. Helpers retain their independent lifetimes. After a restart, surviving member records restore as stopped native registrations with their saved conversations and cursors.
 
 ## Channels and roles
 

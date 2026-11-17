@@ -33,7 +33,7 @@ import type {
 } from "./api";
 import { SWARM_WAIT_DISCONNECTED } from "./api";
 import { getSwarmMemberContext, type PreparedSwarmMember, type SwarmMemberOutcome } from "./context";
-import { createMemberWorkspace, removeMemberWorkspace } from "./workspaces";
+import { createMemberWorkspace, removeMemberWorkspace, verifyMemberWorkspace } from "./workspaces";
 import { BoardStore, type CreateBoardOptions } from "./board-store";
 import { SwarmScheduler, type ScheduledTaskSnapshot, type SchedulerClock } from "./scheduler";
 import {
@@ -567,25 +567,40 @@ export class SwarmRuntime implements SwarmApi {
 				throw new SwarmRefusal("The coordinator owns the swarm lifetime");
 			if (targets.every(member => member.killed))
 				throw new SwarmRefusal(`Member or group ${name} is already killed`);
+			const live = targets.filter(member => !member.killed);
+			// Every workspace is checked while its member still runs, so a refusal leaves the whole group as it was.
+			for (const target of live) await verifyMemberWorkspace(board.dir, actor.id, target.name, target);
 			const killed: string[] = [];
 			const retainedBranches: string[] = [];
-			for (const target of targets.filter(member => !member.killed)) {
+			const retainedWorkspaces: string[] = [];
+			for (const target of live) {
 				this.#closing.add(target.agentId);
 				this.scheduler.killOwner({ id: actor.id, name: target.name, agentId: target.agentId });
 				try {
 					const ref = this.registry.get(target.agentId);
 					if (ref) await this.lifecycle.release(target.agentId, ref, { tombstone: true });
-					const cleanup = await removeMemberWorkspace(board.dir, actor.id, target.name, target);
-					if (cleanup.retainedBranch) retainedBranches.push(cleanup.retainedBranch);
 					board.updateMember(target.name, { killed: true, wakeMode: null, waitSince: null });
 					killed.push(target.name);
+					try {
+						const cleanup = await removeMemberWorkspace(board.dir, actor.id, target.name, target);
+						if (cleanup.retainedBranch) retainedBranches.push(cleanup.retainedBranch);
+					} catch (error) {
+						// The member wrote between the check and its stop: the working copy stays for landing by hand.
+						if (!(error instanceof SwarmRefusal) || !target.workspacePath) throw error;
+						retainedWorkspaces.push(target.workspacePath);
+					}
 				} finally {
 					this.#waiters.get(`${actor.id}:${target.agentId}`)?.settle({ interrupted: true, preserveCursor: true });
 					this.#closing.delete(target.agentId);
 					this.notify({ type: "members", swarmId: actor.id });
 				}
 			}
-			return { ...this.snapshot(actor.id), killed, ...(retainedBranches.length ? { retainedBranches } : {}) };
+			return {
+				...this.snapshot(actor.id),
+				killed,
+				...(retainedBranches.length ? { retainedBranches } : {}),
+				...(retainedWorkspaces.length ? { retainedWorkspaces } : {}),
+			};
 		});
 	}
 

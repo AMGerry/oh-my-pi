@@ -84,3 +84,21 @@ export function formatRoster(snapshot: SwarmSnapshot, options: RosterOptions = {
 	}
 	return lines.join("\n");
 }
+
+const STATUS_STATES = ["working", "waiting", "stopped", "killed"] as const;
+
+/**
+ * Parts of the coordinator's status row: the title, the member count per state and the coordinator's unread
+ * posts. Zero counts are left out.
+ */
+export function formatSwarmStatus(snapshot: SwarmSnapshot): string[] {
+	const members = snapshot.members.filter(member => member.role !== "coordinator");
+	const parts = [`Swarm ${cell(snapshot.title)}`];
+	for (const state of STATUS_STATES) {
+		const count = members.filter(member => member.state === state).length;
+		if (count > 0) parts.push(`${count} ${state}`);
+	}
+	const unread = snapshot.members.find(member => member.role === "coordinator")?.unread ?? 0;
+	if (unread > 0) parts.push(`${unread} unread`);
+	return parts;
+}

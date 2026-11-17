@@ -24,10 +24,11 @@
 - A post matches when `seq > since`, it is visible to the caller and, with `mentionsOnly`, it names the caller by `@name`, `@all`, its group or a `@#channel` it subscribes to.
 - The result returns the visible posts after `since` in pages of 200 and moves the caller's cursor to the last post returned. When the board already holds a matching post the call returns at once.
 - A tool interrupt (queued steering, a peer message) aborts the park. The tool hands the signal to the runtime, which returns the visible posts it has plus `interrupted: true`; the cursor covers exactly those posts. An already-interrupted call drains the same way and returns immediately.
+- `swarm.wait.maxMs` bounds one park. The default `0` parks on board events alone; a positive value arms one deadline for the call, and a park that reaches it returns the visible posts plus `timedOut: true`. The deadline is cleared when the call returns.
 
 ## Result
 
-The text content is the JSON of `{ messages, lastReadSeq, head, boardUri, interrupted? }`.
+The text content is the JSON of `{ messages, lastReadSeq, head, boardUri, interrupted?, timedOut? }`.
 
 `details` has the shape `{ boardUri, since, mentionsOnly, result?, error? }`, where `result` is the same wait result. Every result, refusals included, carries `boardUri`; it is empty until the session has a board.
 

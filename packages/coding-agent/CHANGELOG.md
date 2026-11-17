@@ -12,6 +12,13 @@
 - Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
 - `ask` form notes take pasted screenshots again: with a note open, `Ctrl+V` (`Alt+V` on Windows) or the terminal's own paste attaches the image, and it reaches the model after the answers as `[Image #N]`, described for text-only models ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
 - `ui.formDialog` accepts `acceptImages`: option notes then take pasted images, returned in `OptionNote.images` with their `[Image #N]` markers ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+- Added native swarm: `swarm`, `swarm_post`, `swarm_read`, `swarm_wait` and `swarm_schedule` let a coordinator spawn members as subagent sessions, assign work on a persistent ordered board, park members until a post names them, and run recurring prompts on a 5-field cron; see `docs/swarm.md`
+- Added the bundled `swarm`, `swarm_monitor`, `swarm_narrator` and `swarm_pane` skills, and `disable-slash-command: true` skill frontmatter, which keeps a skill in the model's list and readable through `skill://` while its `/skill:` command is removed
+- Added the `swarm://` scheme: `swarm://` lists boards and `swarm://<id>?tab=board|members|overview&since=N` reads one as a Markdown snapshot; clicking a `swarm://` link in chat or running `/swarm [id or URL]` opens the live board
+- Added `omp swarm [list] [--all]`, `omp swarm board <id> [--since <seq>]` and `omp swarm selftest` (exit code 0 when every step passes), each with `--json`
+- Added the `swarm.enabled`, `swarm.maxMembers`, `swarm.board.tab`, `swarm.board.maxBytes` and `swarm.wait.maxMs` settings (Tasks / Swarm)
+- Added the narrator custom page: `o` on the board's Overview tab opens `view.html` in a sandboxed frame served from loopback, with `narrator.onData` for the data and `narrator.navigate` for host-confirmed navigation
+- Added a status row above the editor for the session's live swarm board: title, member count per state and the coordinator's unread posts
 
 ### Changed
 

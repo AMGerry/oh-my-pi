@@ -144,6 +144,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { formatSwarmStatus } from "../swarm/format";
 import { SwarmRuntime } from "../swarm/runtime";
 import { cfgSwarmEnabled } from "../swarm/settings";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
@@ -2092,6 +2093,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#swarmUiUnsubscribe?: () => void;
+	#swarmStatus = "";
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#subagentHudKey = "";
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
@@ -2372,6 +2374,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			cfgSwarmEnabled.listen(this.settings, enabled => {
 				if (!enabled) this.#selectorController.closeSwarmBoard();
+				this.#syncSwarmStatus();
 				this.#inputController.setupKeyHandlers();
 				this.syncExtensionLinks();
 			}),
@@ -5243,7 +5246,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const descriptionsChanged = this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey;
 		if (descriptionsChanged) this.#renderTodoList();
 		const hudChanged = this.#renderSubagentList();
+		this.#syncSwarmStatus();
 		if (badgeChanged || descriptionsChanged || hudChanged) this.ui.requestRender();
+	}
+
+	/** One row above the editor for this session's live board; it changes with the roster and the unread count. */
+	#syncSwarmStatus(): void {
+		const artifactsDir = this.sessionManager.getArtifactsDir();
+		const runtime = SwarmRuntime.local();
+		const board =
+			artifactsDir && !this.collabGuest && cfgSwarmEnabled.get(this.settings)
+				? runtime.list().find(candidate => path.relative(candidate.dir, path.join(artifactsDir, "swarm")) === "")
+				: undefined;
+		const [title, ...counts] = board ? formatSwarmStatus(runtime.snapshot(board.metadata.id)) : [];
+		const line = title
+			? [theme.fg("accent", sanitizeText(title)), ...counts.map(count => theme.fg("muted", count))].join(
+					theme.fg("dim", theme.sep.dot),
+				)
+			: "";
+		if (line === this.#swarmStatus) return;
+		this.#swarmStatus = line;
+		this.setHookWidget("omp.swarm.status", line ? [line] : undefined);
 	}
 
 	#cancelObserverUiSyncTimer(): void {

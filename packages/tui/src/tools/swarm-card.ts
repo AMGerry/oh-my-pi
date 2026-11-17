@@ -53,6 +53,7 @@ const snapshotSchema = type({
 	"added?": "string[]",
 	"killed?": "string[]",
 	"retainedBranches?": "string[]",
+	"retainedWorkspaces?": "string[]",
 	"models?": type({ model: "string", name: "string" }).array(),
 	"channels?": { "[string]": "unknown" },
 });
@@ -188,6 +189,8 @@ function resultCard(
 		if (payload.killed?.length) card.meta.push(`killed ${payload.killed.join(", ")}`);
 		if (payload.channels) card.rows.push(`Channels: ${Object.keys(payload.channels).join(", ")}`);
 		if (payload.retainedBranches?.length) card.rows.push(`Retained branches: ${payload.retainedBranches.join(", ")}`);
+		if (payload.retainedWorkspaces?.length)
+			card.rows.push(`Retained workspaces: ${payload.retainedWorkspaces.join(", ")}`);
 	} else if ((name === "swarm_read" || name === "swarm_wait") && readSchema.allows(payload)) {
 		card.meta = [
 			formatCount("post", payload.messages.length),

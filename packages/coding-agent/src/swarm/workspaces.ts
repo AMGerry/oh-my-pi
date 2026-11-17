@@ -61,12 +61,13 @@ export async function createMemberWorkspace(
 	);
 }
 
-/** Verify the owned checkout and its landed changes before removing the working copy. */
-export async function removeMemberWorkspace(
+/** Verify the owned checkout and its landed changes; `remove` then deletes the working copy. */
+async function settleMemberWorkspace(
 	swarmDir: string,
 	swarmId: string,
 	name: string,
 	member: SwarmMember,
+	remove: boolean,
 ): Promise<{ retainedBranch?: string }> {
 	if (member.workspace === "inherit") return {};
 	const { workspacePath, workspaceBranch, workspaceBase, workspaceSource } = member;
@@ -105,6 +106,7 @@ export async function removeMemberWorkspace(
 				throw new SwarmRefusal(`Land ${workspaceBranch} in the coordinator's branch before killing ${name}`);
 			}
 		}
+		if (!remove) return {};
 		if (!(await source.worktreeRemove(actual, false))) throw new SwarmRefusal(`Git retained ${name}'s working copy`);
 		// A merge permits deletion; a cherry-pick keeps the original commit reference available.
 		try {
@@ -114,4 +116,24 @@ export async function removeMemberWorkspace(
 		}
 		return { retainedBranch: workspaceBranch };
 	});
+}
+
+/** Check that the member's owned checkout is clean and landed, leaving it in place. */
+export async function verifyMemberWorkspace(
+	swarmDir: string,
+	swarmId: string,
+	name: string,
+	member: SwarmMember,
+): Promise<void> {
+	await settleMemberWorkspace(swarmDir, swarmId, name, member, false);
+}
+
+/** Verify the owned checkout and its landed changes before removing the working copy. */
+export async function removeMemberWorkspace(
+	swarmDir: string,
+	swarmId: string,
+	name: string,
+	member: SwarmMember,
+): Promise<{ retainedBranch?: string }> {
+	return settleMemberWorkspace(swarmDir, swarmId, name, member, true);
 }

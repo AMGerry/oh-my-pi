@@ -158,6 +158,9 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - `src/internal-urls/swarm-protocol.ts` serves `swarm://` snapshots; `src/modes/swarm-board-runtime.ts` supplies event-driven live state and validated narrator documents.
 - `packages/tui/src/overlays/swarm-board.ts` renders Board, Members and Overview. `/swarm`, Alt+B and prose links open the same board; Escape restores editor focus.
 - `packages/tui/src/tools/swarm-card.ts` supplies the five tool cards. Consecutive `swarm_read` calls share the native read-group lifecycle, and expanded groups show their posts.
+- `src/swarm/custom-page.ts` serves a narrator's `view.html` on a loopback page with a sandboxed frame; `custom-page-bridge.js.txt` is the frame bootstrap and `view-store.ts` validates the documents.
+- `src/skills/` holds the four bundled swarm skills with `PROVENANCE.md`; `src/discovery/bundled-swarm.ts` registers them at priority 10.
+- `src/cli/swarm-cli.ts` implements `omp swarm list | board <id> | selftest`; `selftest` exercises the runtime headlessly and is part of the binary gate.
 - Run `bun test test/swarm test/internal-urls/swarm-protocol.test.ts` from this package for the board, runtime, scheduler and interactive integration tests.
 
 ### Web I/O and retrieval
