@@ -6,6 +6,7 @@ import description from "../../prompts/tools/swarm.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
 import { TaskTool } from "../../task";
 import { getBundledAgent } from "../../task/agents";
+import { SWARM_MEMBER_AGENT } from "../context";
 import {
 	assertPerCallModelApproved,
 	parentModelGrantPattern,
@@ -77,7 +78,7 @@ export class SwarmTool implements AgentTool<typeof controlSchema, SwarmToolDetai
 					const coordinator = initial.members.find(member => member.role === "coordinator")!;
 					const parent = (this.session.agentRegistry ?? AgentRegistry.global()).get(coordinator.agentId)?.session
 						?.model;
-					const agent = getBundledAgent("swarm")!;
+					const agent = getBundledAgent(SWARM_MEMBER_AGENT)!;
 					const grants: PerCallModelGrants = {
 						settings: this.session.settings,
 						agentName: agent.name,

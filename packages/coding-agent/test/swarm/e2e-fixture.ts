@@ -590,7 +590,7 @@ export async function createSwarmE2E(options: SwarmE2EOptions = {}): Promise<Swa
 		provider === model.provider && id === model.id ? model : find(provider, id),
 	);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
-		agents: [{ ...getBundledAgent("swarm")!, tools: MEMBER_TOOLS }],
+		agents: [{ ...getBundledAgent("swarm-member")!, tools: MEMBER_TOOLS }],
 		projectAgentsDir: null,
 	});
 	// Each member's run ends with work after its session is released (its output file, its artifact handles);

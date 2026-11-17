@@ -26,7 +26,7 @@ import type {
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
-import type { PreparedSwarmMember, SwarmLaunchPlan } from "../swarm/context";
+import { type PreparedSwarmMember, SWARM_MEMBER_AGENT, type SwarmLaunchPlan } from "../swarm/context";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -168,7 +168,8 @@ interface TaskDescriptionOptions {
 function renderDescription(options: TaskDescriptionOptions): string {
 	const spawnPolicy = resolveSpawnPolicy(options.parentSpawns);
 	const spawningDisabled = !spawnPolicy.enabled;
-	const agents = [...options.agents, ...options.sessionAgents];
+	// Board members start through `swarm{action:"add"}`, so the task roster leaves their agent to that tool.
+	const agents = [...options.agents, ...options.sessionAgents].filter(agent => agent.name !== SWARM_MEMBER_AGENT);
 	let filteredAgents =
 		options.disabledAgents.length > 0 ? agents.filter(agent => !options.disabledAgents.includes(agent.name)) : agents;
 	if (spawningDisabled) {
@@ -1047,7 +1048,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			session: { ...this.session, cwd: plan.cwd },
 			invocationKind: "task",
 			modelSurface: { kind: "swarm", coordinatorModel: plan.coordinatorModel },
-			agent: "swarm",
+			agent: SWARM_MEMBER_AGENT,
 			assignment: plan.brief,
 			perCallModel: plan.model,
 			structured: false,

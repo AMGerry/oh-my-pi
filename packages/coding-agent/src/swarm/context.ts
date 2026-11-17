@@ -1,6 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
 import { memberNameSchema } from "./types";
 
+/** Bundled agent every shared-board member runs; `swarm{action:"add"}` starts it. */
+export const SWARM_MEMBER_AGENT = "swarm-member";
+
 export const swarmMemberContextSchema = type({
 	kind: "'swarm'",
 	id: memberNameSchema,

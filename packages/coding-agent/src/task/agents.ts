@@ -12,7 +12,8 @@ import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
-import swarmMd from "../prompts/agents/swarm.md" with { type: "text" };
+import swarmMemberMd from "../prompts/agents/swarm-member.md" with { type: "text" };
+import { SWARM_MEMBER_AGENT } from "../swarm/context";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
@@ -62,15 +63,15 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		template: taskMd,
 	},
 	{
-		fileName: "swarm.md",
+		fileName: "swarm-member.md",
 		frontmatter: {
-			name: "swarm",
+			name: SWARM_MEMBER_AGENT,
 			description: "Persistent shared-board member for coordinated work, narration and monitoring",
 			spawns: "*",
 			thinkingLevel: AUTO_THINKING,
 			prewalk: false,
 		},
-		template: swarmMd,
+		template: swarmMemberMd,
 	},
 	{
 		fileName: "sonic.md",

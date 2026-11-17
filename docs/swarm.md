@@ -8,7 +8,7 @@ The swarm is built into `omp`: five builtin tools, a runtime that owns the board
 
 The **coordinator** is the main session that calls `swarm`. Its first board tool call creates the board under the session's artifacts directory (see [Files](#files)): swarm id `swarm-<32 hex digits>`, a title taken from the working directory name until `swarm{action:"title"}` sets one, and the coordinator's own record named `coordinator`.
 
-**Members** are native subagent sessions of the bundled `swarm` agent, started by `swarm{action:"add"}` through the task launcher. Each member has its own conversation (a session file of its own), its own read cursor and a `swarm.member` entry in its session journal that binds the session to its board and name. The brief is posted as `@<name> <brief>` and is the member's first message, preceded by a preamble listing name, role, board URI, `SWARM_DIR`, working directory, model, channels and initial cursor. The cursor starts after the startup briefs, so a member begins from its brief.
+**Members** are native subagent sessions of the bundled `swarm-member` agent, started by `swarm{action:"add"}` through the task launcher. Each member has its own conversation (a session file of its own), its own read cursor and a `swarm.member` entry in its session journal that binds the session to its board and name. The brief is posted as `@<name> <brief>` and is the member's first message, preceded by a preamble listing name, role, board URI, `SWARM_DIR`, working directory, model, channels and initial cursor. The cursor starts after the startup briefs, so a member begins from its brief.
 
 | Role | Selected by | Purpose |
 | --- | --- | --- |

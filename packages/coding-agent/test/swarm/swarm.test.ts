@@ -12,7 +12,7 @@ import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AuthStorage } from "../../src/session/auth-storage";
-import { SessionManager } from "../../src/session/session-manager";
+import { extractSessionInit, SessionManager } from "../../src/session/session-manager";
 import { EventController } from "../../src/modes/controllers/event-controller";
 import { cfgTerminalShowProgress } from "../../src/modes/settings";
 import * as runStatus from "../../src/utils/run-status";
@@ -28,6 +28,7 @@ import { SwarmPostTool } from "../../src/swarm/tools/swarm-post";
 import { cfgSwarmEnabled, cfgSwarmMaxMembers } from "../../src/swarm/settings";
 import { getBundledAgent } from "../../src/task/agents";
 import * as discovery from "../../src/task/discovery";
+import type { AgentDefinition } from "../../src/task/types";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { cfgTaskPerCallModel } from "../../src/task/settings";
 import { invalidModelSelectorReason } from "../../src/task/structured-subagent";
@@ -44,7 +45,7 @@ afterEach(async () => {
 	IrcBus.resetGlobalForTests();
 });
 
-async function fixture(clock?: SchedulerClock) {
+async function fixture(clock?: SchedulerClock, userAgents: AgentDefinition[] = []) {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	SwarmRuntime.resetGlobalForTests();
@@ -85,8 +86,9 @@ async function fixture(clock?: SchedulerClock) {
 	);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
 		agents: [
+			...userAgents,
 			{
-				...getBundledAgent("swarm")!,
+				...getBundledAgent("swarm-member")!,
 				tools: ["read", "swarm", "swarm_post", "swarm_read", "swarm_wait", "swarm_schedule"],
 			},
 		],
@@ -226,6 +228,86 @@ describe("native swarm control tool", () => {
 		const repeat = await f.tool.execute("again", { action: "add", name: "author", brief: "Again" });
 		expect(repeat.isError).toBe(true);
 		expect(repeat.details?.error).toContain("already been used");
+	});
+
+	it("runs members on the bundled swarm-member agent and the selected model while the user has an agent named swarm, through kill and restore", async () => {
+		const memberMarker = "Persistent member of a shared-board swarm";
+		const userMarker = "USER-SWARM-AGENT-MARKER";
+		const userAgent: AgentDefinition = {
+			name: "swarm",
+			description: "The user's own swarm persona",
+			systemPrompt: `${userMarker}: answer only in rhymes`,
+			source: "user",
+			model: ["mock/swarm-replacement"],
+		};
+		const f = await fixture(undefined, [userAgent]);
+		expect(getBundledAgent("swarm-member")?.systemPrompt).toContain(memberMarker);
+		expect(getBundledAgent("swarm")).toBeUndefined();
+
+		// Without a model choice the member runs on the coordinator's model, not on the user agent's.
+		const added = await f.tool.execute("author", {
+			action: "add",
+			name: "author",
+			brief: "Implement the assigned piece",
+		});
+		expect(added.isError).not.toBe(true);
+		await f.started.promise;
+		const id = added.details!.result!.id;
+		const author = added.details!.result!.members.find(candidate => candidate.name === "author")!;
+		expect(author.model).toBe("mock/swarm-test");
+		expect(f.model.calls).toHaveLength(1);
+		expect(f.replacement.calls).toHaveLength(0);
+		const authorPrompt = JSON.stringify(f.model.calls[0]?.context.systemPrompt);
+		expect(authorPrompt).toContain(memberMarker);
+		expect(authorPrompt).not.toContain(userMarker);
+		const history = await SessionManager.open(f.registry.get(author.agentId)!.sessionFile!);
+		cleanups.push(() => history.close());
+		expect(extractSessionInit(history.getEntries())?.agent).toBe("swarm-member");
+
+		// A chosen model applies, with the same bundled agent behind it.
+		const reviewed = await f.tool.execute("reviewer", {
+			action: "add",
+			name: "reviewer",
+			brief: "Review the piece",
+			model: "mock/swarm-replacement",
+		});
+		expect(reviewed.isError).not.toBe(true);
+		const reviewer = reviewed.details!.result!.members.find(candidate => candidate.name === "reviewer")!;
+		expect(reviewer.model).toBe("mock/swarm-replacement");
+		await untilRuntime(f.runtime, () => f.registry.get(reviewer.agentId)?.status === "parked");
+		expect(f.replacement.calls).toHaveLength(1);
+		const reviewerPrompt = JSON.stringify(f.replacement.calls[0]?.context.systemPrompt);
+		expect(reviewerPrompt).toContain(memberMarker);
+		expect(reviewerPrompt).not.toContain(userMarker);
+
+		// A restored process lists both members under the bundled agent, the killed one as aborted.
+		await f.tool.execute("kill", { action: "kill", name: "author" });
+		expect(f.registry.get(author.agentId)?.status).toBe("aborted");
+		const board = f.runtime.board(id);
+		const restoredRegistry = new AgentRegistry();
+		const restoredLifecycle = new AgentLifecycleManager(restoredRegistry);
+		const restored = new SwarmRuntime(restoredRegistry, restoredLifecycle);
+		cleanups.push(async () => {
+			restored.dispose();
+			await restoredLifecycle.dispose();
+		});
+		await restored.ensure({
+			agentId: reviewer.agentId,
+			cwd: f.cwd,
+			sessionFile: board.member("reviewer").sessionFile!,
+			artifactsDir: f.journal.getArtifactsDir()!,
+			model: "mock/swarm-replacement",
+			maxMembers: 32,
+			context: { kind: "swarm", id, name: "reviewer", agentId: reviewer.agentId, dir: board.dir },
+		});
+		expect(restoredRegistry.get(author.agentId)).toMatchObject({
+			status: "aborted",
+			history: { agent: "swarm-member" },
+		});
+		expect(restoredRegistry.get(reviewer.agentId)).toMatchObject({
+			status: "parked",
+			history: { agent: "swarm-member" },
+		});
 	});
 
 	it("parks two native TaskTool conversations inside swarm_wait and resumes only the addressed member with its selected model", async () => {

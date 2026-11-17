@@ -32,7 +32,12 @@ import type {
 	WaitParams,
 } from "./api";
 import { SWARM_WAIT_DISCONNECTED } from "./api";
-import { getSwarmMemberContext, type PreparedSwarmMember, type SwarmMemberOutcome } from "./context";
+import {
+	getSwarmMemberContext,
+	type PreparedSwarmMember,
+	SWARM_MEMBER_AGENT,
+	type SwarmMemberOutcome,
+} from "./context";
 import { createMemberWorkspace, removeMemberWorkspace, verifyMemberWorkspace } from "./workspaces";
 import { BoardStore, type CreateBoardOptions } from "./board-store";
 import { SwarmScheduler, type ScheduledTaskSnapshot, type SchedulerClock } from "./scheduler";
@@ -215,7 +220,7 @@ export class SwarmRuntime implements SwarmApi {
 						session: null,
 						sessionFile: member.sessionFile,
 						status: member.killed ? "aborted" : "parked",
-						history: { agent: "swarm", resolvedModel: member.model },
+						history: { agent: SWARM_MEMBER_AGENT, resolvedModel: member.model },
 					},
 					null,
 				);

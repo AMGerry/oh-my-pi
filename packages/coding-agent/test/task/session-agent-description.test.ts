@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type AgentDefinition, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { SWARM_MEMBER_AGENT } from "@oh-my-pi/pi-coding-agent/swarm/context";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const DISCOVERED: AgentDefinition[] = [
@@ -73,5 +75,39 @@ describe("task description session agents", () => {
 
 		live.push(tagged("m1", "b/y"));
 		expect(tool.description).toContain("`m1`");
+	});
+});
+
+describe("task description and the bundled swarm member agent", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("leaves the member agent out of the roster, from discovery and from the session's agents, and lists a user agent named swarm", async () => {
+		const member = getBundledAgent(SWARM_MEMBER_AGENT);
+		if (!member) throw new Error("The bundled swarm member agent must exist");
+		const userAgent: AgentDefinition = {
+			name: "swarm",
+			description: "The user's own swarm persona",
+			systemPrompt: "You are my swarm persona.",
+			source: "user",
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [...DISCOVERED, member, userAgent],
+			projectAgentsDir: null,
+		});
+		const tool = await TaskTool.create(createSession(() => [tagged(SWARM_MEMBER_AGENT, "b/y"), tagged("m1", "b/y")]));
+
+		expect(tool.description).toContain("- `task`: General-purpose task agent");
+		expect(tool.description).toContain("- `swarm`: The user's own swarm persona");
+		expect(tool.description).toContain("- `m1`:");
+		expect(tool.description).not.toContain(`\`${SWARM_MEMBER_AGENT}\``);
+		expect(tool.description).not.toContain(member.description);
+	});
+
+	it("keeps the member agent bundled under its own name, so a user agent named swarm never shadows it", () => {
+		expect(SWARM_MEMBER_AGENT).toBe("swarm-member");
+		expect(getBundledAgent(SWARM_MEMBER_AGENT)).toMatchObject({ name: "swarm-member", source: "bundled" });
+		expect(getBundledAgent("swarm")).toBeUndefined();
 	});
 });
