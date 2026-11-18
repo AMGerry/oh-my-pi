@@ -13,6 +13,7 @@ import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type {
 	AgentSessionAdvisorOverview,
@@ -215,6 +216,18 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
 		return mainBridge().remote.call("steer", this, text, images, options);
+	}
+
+	setModelTemporary(
+		model: Model,
+		thinkingLevel?: ConfiguredThinkingLevel,
+		options?: { ephemeral?: boolean },
+	): Promise<void> {
+		return mainBridge().remote.call("setModelTemporary", this, model, thinkingLevel, options);
+	}
+
+	retry(): Promise<boolean> {
+		return mainBridge().remote.call("retry", this);
 	}
 
 	abort(options?: SessionAbortOptions): Promise<void> {

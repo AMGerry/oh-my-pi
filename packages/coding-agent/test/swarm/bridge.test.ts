@@ -1,0 +1,207 @@
+import { afterEach, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "../../src/config/model-registry";
+import { Settings } from "../../src/config/settings";
+import { IrcBus } from "../../src/irc/bus";
+import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
+import { AgentSession } from "../../src/session/agent-session";
+import { AuthStorage } from "../../src/session/auth-storage";
+import { SessionManager } from "../../src/session/session-manager";
+import type { SwarmCaller } from "../../src/swarm/api";
+import { SwarmRuntime } from "../../src/swarm/runtime";
+import type { ThreadService } from "../../src/thread/services";
+import { agentsThreadService } from "../../src/thread/services/agents";
+import { identityThreadService } from "../../src/thread/services/identity";
+import { swarmThreadService } from "../../src/thread/services/swarm";
+import { SubagentWorker } from "../../src/thread/subagent-worker";
+import type { SwarmProbe, SwarmProbeGlobals } from "../fixtures/swarm-bridge-worker";
+
+const cleanups: Array<() => void | Promise<void>> = [];
+afterEach(async () => {
+	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	SwarmRuntime.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+});
+
+async function worker(onCreated?: (worker: SubagentWorker) => void): Promise<SwarmProbe> {
+	const probe = Promise.withResolvers<SwarmProbe>();
+	const service: ThreadService = {
+		name: "swarm-probe",
+		globals: (): SwarmProbeGlobals => ({ ready: value => probe.resolve(value) }),
+	};
+	const spawned = new SubagentWorker({
+		entry: new URL("../fixtures/swarm-bridge-worker.ts", import.meta.url),
+		services: [identityThreadService, agentsThreadService, swarmThreadService, service],
+		initTimeoutMs: 20000,
+	});
+	onCreated?.(spawned);
+	cleanups.push(() => spawned.terminate("swarm test complete"));
+	await spawned.ready;
+	return probe.promise;
+}
+
+function boardFixture() {
+	SwarmRuntime.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-swarm-bridge-"));
+	const registry = AgentRegistry.global();
+	const lifecycle = AgentLifecycleManager.global();
+	const runtime = SwarmRuntime.local();
+	const caller: SwarmCaller = {
+		agentId: "Main",
+		cwd,
+		artifactsDir: path.join(cwd, "artifacts"),
+		sessionFile: path.join(cwd, "parent.jsonl"),
+		model: "mock/parent",
+		maxMembers: 32,
+	};
+	registry.register({
+		id: "Main",
+		displayName: "Main",
+		kind: "main",
+		session: null,
+		sessionFile: caller.sessionFile,
+		status: "idle",
+	});
+	cleanups.push(async () => {
+		runtime.dispose();
+		await lifecycle.dispose();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+	return { cwd, registry, lifecycle, runtime, caller };
+}
+
+it("serializes control calls from two real worker threads and retains completion callbacks", async () => {
+	const { registry, runtime, caller } = boardFixture();
+	const [left, right] = await Promise.all([worker(), worker()]);
+	expect(await left.writerGuard()).toBe(true);
+	const results = await Promise.all([
+		left.add(caller, { action: "add", name: "left", brief: "Complete left work", n: 3 }),
+		right.add(caller, { action: "add", name: "right", brief: "Complete right work", n: 3 }),
+	]);
+	expect(results[0]!.id).toBe(results[1]!.id);
+	const board = runtime.board(results[0]!.id);
+	expect(board.posts().map(post => post.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+	expect(board.listMembers()).toHaveLength(7);
+	expect(registry.list().filter(ref => ref.kind === "sub")).toHaveLength(6);
+	await right.finish("right-2", { error: "429 quota" });
+	expect(runtime.snapshot(board.metadata.id).members.find(member => member.name === "right-2")).toMatchObject({
+		state: "waiting",
+		error: "quota",
+	});
+	const own = await runtime.ensure(caller);
+	await runtime.kill(own, "left");
+	await expect(left.add(caller, { action: "add", name: "left", brief: "Again" })).rejects.toThrow("already been used");
+});
+
+it("routes a waiting peer's explicit model change through the native session bridge", async () => {
+	SwarmRuntime.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+	const from = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+	const to = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+	const auth = await AuthStorage.create(":memory:");
+	auth.keys.setRuntime("anthropic", "test-key");
+	const session = new AgentSession({
+		agent: new Agent({ initialState: { model: from, systemPrompt: ["Model bridge test"], tools: [], messages: [] } }),
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated(),
+		modelRegistry: new ModelRegistry(auth),
+		agentId: "Main",
+	});
+	AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session, status: "idle" });
+	cleanups.push(async () => {
+		await session.dispose();
+		auth.close();
+	});
+	const probe = await worker();
+	expect(await probe.switchPeerModel("Main", to)).toBe(to.id);
+	expect(session.model?.id).toBe(to.id);
+});
+
+it("passes a real wait, board delivery, read and an already-aborted signal through worker RPC", async () => {
+	const { runtime, caller } = boardFixture();
+	const [left, right] = await Promise.all([worker(), worker()]);
+	const added = await left.add(caller, { action: "add", name: "waiting", brief: "Wait for the board" });
+	const member = added.members.find(candidate => candidate.name === "waiting")!;
+	const actor = { id: added.id, name: member.name, agentId: member.agentId };
+	const coordinator = await runtime.ensure(caller);
+	const entered = Promise.withResolvers<void>();
+	const stop = runtime.onChange(() => {
+		if (runtime.waiters(added.id).some(waiter => waiter.agentId === member.agentId)) entered.resolve();
+	});
+	const waiting = left.wait(actor, { since: added.head });
+	await entered.promise;
+	stop();
+	await right.post(coordinator, "Public progress for @unknown");
+	expect(runtime.waiters(added.id).map(waiter => waiter.name)).toEqual(["waiting"]);
+	const wake = await right.post(coordinator, "@waiting continue");
+	expect(wake.receipts).toEqual([{ name: "waiting", to: member.agentId, outcome: "woken" }]);
+	expect((await waiting).messages.map(post => post.seq)).toEqual([2, 3]);
+	expect(runtime.waiters(added.id)).toEqual([]);
+	expect((await right.read(actor)).messages).toEqual([]);
+	await right.post(coordinator, "Pending data for a later read");
+	const aborted = new AbortController();
+	aborted.abort("tool interrupted");
+	const result = await left.wait(actor, { since: 3 }, aborted.signal);
+	expect(result).toMatchObject({ interrupted: true, lastReadSeq: 4 });
+	expect(result.messages.map(post => post.seq)).toEqual([4]);
+});
+
+it("clears a disconnected worker's real waiter while preserving its unread cursor", async () => {
+	const { runtime, caller } = boardFixture();
+	let spawned: SubagentWorker | undefined;
+	const probe = await worker(value => {
+		spawned = value;
+	});
+	const added = await probe.add(caller, { action: "add", name: "disconnected", brief: "Keep this conversation" });
+	const member = added.members.find(candidate => candidate.name === "disconnected")!;
+	const actor = { id: added.id, name: member.name, agentId: member.agentId };
+	const entered = Promise.withResolvers<void>();
+	const stop = runtime.onChange(() => {
+		if (runtime.waiters(added.id).some(waiter => waiter.agentId === member.agentId)) entered.resolve();
+	});
+	const waiting = probe.wait(actor, { since: added.head });
+	const disconnected = waiting.catch((error: unknown) => error);
+	await entered.promise;
+	stop();
+	await runtime.post(await runtime.ensure(caller), "An unread update before the worker exits");
+	await spawned!.terminate("simulate a disconnected swarm worker");
+	expect(await disconnected).toMatchObject({ name: "RpcClosedError" });
+	expect(runtime.waiters(added.id)).toEqual([]);
+	expect(runtime.board(added.id).member(member.name)).toMatchObject({
+		lastReadSeq: added.head,
+		wakeMode: null,
+		waitSince: null,
+	});
+});
+
+it("shares scheduler create/list/kill across real worker threads", async () => {
+	const { runtime, caller } = boardFixture();
+	const [left, right] = await Promise.all([worker(), worker()]);
+	const added = await left.add(caller, { action: "add", name: "monitor", brief: "Monitor the board" });
+	const member = added.members.find(candidate => candidate.name === "monitor")!;
+	const actor = { id: added.id, name: member.name, agentId: member.agentId };
+	const coordinator = await runtime.ensure(caller);
+	const created = await left.schedule(actor, {
+		action: "create",
+		cron: "*/3 * * * *",
+		prompt: "Inspect stalls",
+		daemon: true,
+	});
+	expect(created.task).toMatchObject({ owner: "monitor", agentId: member.agentId, daemon: true, running: false });
+	expect((await right.schedule(coordinator, { action: "list" })).tasks).toEqual([created.task!]);
+	expect(runtime.scheduler.list(actor)).toEqual([created.task!]);
+	expect((await right.schedule(coordinator, { action: "kill", id: created.id! })).id).toBe(created.id);
+	expect((await left.schedule(actor, { action: "list" })).tasks).toEqual([]);
+});

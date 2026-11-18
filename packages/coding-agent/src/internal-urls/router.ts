@@ -36,6 +36,7 @@ import { RuleProtocolHandler } from "./rule-protocol";
 import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
 import { SshProtocolHandler } from "./ssh-protocol";
+import { SwarmProtocolHandler } from "./swarm-protocol";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -114,6 +115,7 @@ export class InternalUrlRouter {
 		this.register(new OutProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new HistoryProtocolHandler());
+		this.register(new SwarmProtocolHandler());
 		this.register(new ArtifactProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new ProcProtocolHandler());

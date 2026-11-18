@@ -34,6 +34,8 @@ export type TranscriptAction =
 	| { readonly act: "turn"; readonly turn: TurnAct; readonly message: TurnMessage }
 	/** Resume the session stored at `path` (a welcome card's recent session). */
 	| { readonly act: "resume"; readonly path: string }
+	/** Open a board link from assistant prose in the live swarm overlay. */
+	| { readonly act: "swarm-board"; readonly url: string }
 	/** Put `text` on the clipboard. */
 	| { readonly act: "copy"; readonly text: string }
 	/**

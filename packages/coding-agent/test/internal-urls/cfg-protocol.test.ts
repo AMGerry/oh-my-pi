@@ -10,6 +10,7 @@ import {
 	setCfgApprovalHost,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgAdvisorEnabled, cfgAdvisorSyncBacklog } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -277,6 +278,7 @@ describe("CfgProtocolHandler", () => {
 			expect(textOf(shadowed)).toContain("project config takes precedence");
 			expect(cfgBashPatterns.get(reset)).toEqual([]);
 		} finally {
+			AgentStorage.close();
 			await dir.remove();
 		}
 	});

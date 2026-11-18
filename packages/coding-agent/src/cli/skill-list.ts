@@ -39,13 +39,15 @@ export async function runSkillsCommand(
 	let skillsSettings: Partial<SkillsSettings>;
 	let disabledExtensions: string[];
 	let extensionRoots: EffectiveExtensionRoots;
+	let settings: Settings;
 	if (options.skillsSettings) {
 		// Test seam: fully isolated from ambient configuration.
 		skillsSettings = options.skillsSettings;
+		settings = Settings.isolated({});
 		disabledExtensions = [];
 		extensionRoots = { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
 	} else {
-		const settings = await Settings.init({ cwd });
+		settings = await Settings.init({ cwd });
 		initializeWithSettings(settings);
 		skillsSettings = cfgSkills.get(settings);
 		disabledExtensions = [...cfgDisabledExtensions.get(settings)];
@@ -73,6 +75,7 @@ export async function runSkillsCommand(
 	const { skills, warnings } = await loadSkills({
 		...skillsSettings,
 		cwd,
+		settings,
 		disabledExtensions,
 		extensionRoots,
 	});

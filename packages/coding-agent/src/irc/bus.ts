@@ -26,7 +26,7 @@ export interface IrcWaitFilter {
 	/** Only messages from this agent. */
 	from?: string;
 	/**
-	 * Skip broadcast legs and progress notes, which ask the waiter nothing: they
+	 * Skip broadcast legs, progress notes and board notices, which ask the waiter nothing: they
 	 * reach it through ordinary delivery, a non-interrupting aside when it is busy.
 	 */
 	directOnly?: boolean;
@@ -41,8 +41,8 @@ export interface IrcWaitFilter {
 /** Whether a bus wait under `filter` consumes `msg`. */
 function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
-	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
-	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
+	if (!filter.directOnly || (!msg.broadcast && !msg.progress && !msg.boardNotice)) return true;
+	return !msg.progress && !msg.boardNotice && (filter.repliesFrom?.includes(msg.from) ?? false);
 }
 
 /** When a send went out: wall-clock `ts`, and `seq` to order sends within one millisecond. */
@@ -151,7 +151,7 @@ export class IrcBus implements IrcBusApi {
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		const receipt = await this.#deliver(message);
-		if (receipt.outcome !== "failed") {
+		if (receipt.outcome !== "failed" && !message.boardNotice) {
 			if (message.progress) {
 				this.#record(this.#lastProgress, message.from, message.to, mark);
 			} else {

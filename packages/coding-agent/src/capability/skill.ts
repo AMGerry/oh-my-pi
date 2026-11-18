@@ -28,6 +28,8 @@ export interface SkillFrontmatter {
 	 * @see https://agentskills.io/specification
 	 */
 	disableModelInvocation?: boolean;
+	/** Keeps the skill model-visible and URI-readable while suppressing its slash command. */
+	disableSlashCommand?: boolean;
 	[key: string]: unknown;
 }
 

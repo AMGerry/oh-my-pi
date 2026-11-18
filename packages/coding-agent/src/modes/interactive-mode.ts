@@ -144,6 +144,9 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { formatSwarmStatus } from "../swarm/format";
+import { SwarmRuntime } from "../swarm/runtime";
+import { cfgSwarmEnabled } from "../swarm/settings";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
@@ -2098,6 +2101,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
+	#swarmUiUnsubscribe?: () => void;
+	#swarmStatus = "";
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#subagentHudKey = "";
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
@@ -2227,7 +2232,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
 		this.#eventBusUnsubscribers.push(
 			onNativeRenderingChange(() => {
-				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				if (
+					cfgSwarmEnabled.get(this.settings) ||
+					(this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0
+				)
+					this.#redrawExtensionLinks();
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
@@ -2372,6 +2381,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.#eventBusUnsubscribers.push(
+			cfgSwarmEnabled.listen(this.settings, enabled => {
+				if (!enabled) this.#selectorController.closeSwarmBoard();
+				this.#syncSwarmStatus();
+				this.#inputController.setupKeyHandlers();
+				this.syncExtensionLinks();
+			}),
+		);
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -2675,6 +2692,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						(error: unknown) =>
 							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 					);
+					return;
+				case "swarm-board":
+					this.showSwarmBoard(action.url);
 					return;
 				case "spotlight":
 					void this.#showSpotlightSheet(action.spotlight, action.reduced);
@@ -3126,6 +3146,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.skillsSettings?.enableSkillCommands !== false) {
 			const icon = getSlashCommandTypeIcon("skill");
 			for (const skill of this.session.skills) {
+				if (skill.disableSlashCommand) continue;
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
 				skillCommandList.push({
@@ -4477,7 +4498,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const before = extensionLinksVersion();
 		const viewed = this.viewSession.extensionRunner;
 		viewed?.followSuspension(this.session.extensionRunner);
-		setExtensionLinks(viewed?.getLinkSchemes() ?? []);
+		const schemes = new Set(viewed?.getLinkSchemes() ?? []);
+		if (cfgSwarmEnabled.get(this.settings)) schemes.add("swarm");
+		setExtensionLinks(schemes);
 		return extensionLinksVersion() !== before;
 	}
 
@@ -4518,6 +4541,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Raise `link_activate` for `url` on `runner`, the extension runner of the transcript it was drawn in. */
 	#activateLink(url: string, runner: ExtensionRunner | undefined): boolean {
+		if (/^swarm:/i.test(url) && cfgSwarmEnabled.get(this.settings)) {
+			this.showSwarmBoard(url);
+			return true;
+		}
 		if (!runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
 		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
@@ -4838,6 +4865,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): boolean {
+		this.#swarmUiUnsubscribe ??= SwarmRuntime.local().onChange(() => this.#scheduleObserverUiSync());
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
@@ -4848,7 +4876,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#scheduleObserverUiSync();
 			});
 		}
-		const agentIds = getRunningSubagentBadgeAgentIds(registry);
+		const agentIds = getRunningSubagentBadgeAgentIds(registry).filter(
+			id => this.collabGuest || !SwarmRuntime.local().isPassive(id),
+		);
 		this.#runningSubagentCount = agentIds.length;
 		const inspectable = getInspectableSubagentCount(registry);
 		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
@@ -5239,7 +5269,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const descriptionsChanged = this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey;
 		if (descriptionsChanged) this.#renderTodoList();
 		const hudChanged = this.#renderSubagentList();
+		this.#syncSwarmStatus();
 		if (badgeChanged || descriptionsChanged || hudChanged) this.ui.requestRender();
+	}
+
+	/** One row above the editor for this session's live board; it changes with the roster and the unread count. */
+	#syncSwarmStatus(): void {
+		const artifactsDir = this.sessionManager.getArtifactsDir();
+		const runtime = SwarmRuntime.local();
+		const board =
+			artifactsDir && !this.collabGuest && cfgSwarmEnabled.get(this.settings)
+				? runtime.list().find(candidate => path.relative(candidate.dir, path.join(artifactsDir, "swarm")) === "")
+				: undefined;
+		const [title, ...counts] = board ? formatSwarmStatus(runtime.snapshot(board.metadata.id)) : [];
+		const line = title
+			? [theme.fg("accent", sanitizeText(title)), ...counts.map(count => theme.fg("muted", count))].join(
+					theme.fg("dim", theme.sep.dot),
+				)
+			: "";
+		if (line === this.#swarmStatus) return;
+		this.#swarmStatus = line;
+		this.setHookWidget("omp.swarm.status", line ? [line] : undefined);
 	}
 
 	#cancelObserverUiSyncTimer(): void {
@@ -5630,7 +5680,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		| undefined {
 		const mode = cfgDisplayPinnedAgents.get(settings);
 		if (mode === "off") return undefined;
-		const sessions = this.#observerRegistry.getSessions();
+		const sessions = this.#observerRegistry
+			.getSessions()
+			.filter(session => this.collabGuest || !SwarmRuntime.local().isPassive(session.id));
 		const running = sessions.filter(isHudSubagent);
 		const expanded = this.#pinnedHudOverride ?? mode === "full";
 		const livePreview = cfgDisplaySubagentLivePreview.get(settings);
@@ -8216,6 +8268,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.dispose();
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
+		this.#swarmUiUnsubscribe?.();
+		this.#swarmUiUnsubscribe = undefined;
 		this.#agentRegistrySubscriptionTarget = undefined;
 		this.#eventController.dispose();
 		this.#codexResetFireworksController.dispose();
@@ -8238,6 +8292,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
+		this.#selectorController.closeSwarmBoard();
 		if (this.#ownsStartedUi) {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
@@ -8944,6 +8999,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	ensureLoadingAnimation(): void {
+		if (SwarmRuntime.local().isPassive(this.focusedAgentId ?? this.session.getAgentId() ?? MAIN_AGENT_ID)) {
+			this.#stopLoadingAnimation(true);
+			return;
+		}
 		if (this.autoCompactionLoader || this.retryLoader) return;
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
@@ -9278,6 +9337,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async prepareSessionSwitch(): Promise<void> {
+		this.#selectorController.closeSwarmBoard();
 		this.#clearJudgmentBatchProgress(true);
 		await this.#btwController.dispose();
 		this.#omfgController.dispose();
@@ -9527,6 +9587,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showAgentHub(options?: AgentHubOpenOptions): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
+	}
+
+	showSwarmBoard(url?: string): void {
+		this.#selectorController.showSwarmBoard(url);
 	}
 
 	resetObserverRegistry(): void {

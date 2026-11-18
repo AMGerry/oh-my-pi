@@ -1,0 +1,143 @@
+(() => {
+	"use strict";
+	const hostOrigin = __OMP_HOST_ORIGIN__;
+	try {
+		for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "XSLTProcessor", "HTMLLinkElement", "HTMLAnchorElement", "HTMLAreaElement", "SVGAElement"]) {
+			Object.defineProperty(window, name, { value: undefined, writable: false, configurable: false });
+		}
+		for (const constructor of [window.TrustedHTML, window.TrustedScript, window.TrustedScriptURL]) {
+			if (constructor) Object.defineProperty(constructor, "fromLiteral", { value: undefined, writable: false, configurable: false });
+		}
+		Object.defineProperty(Document.prototype, "execCommand", { value: undefined, writable: false, configurable: false });
+		const apply = Reflect.apply;
+		const asString = String;
+		const lowerCase = String.prototype.toLowerCase;
+		const lastIndexOf = String.prototype.lastIndexOf;
+		const slice = String.prototype.slice;
+		const htmlNamespace = "http://www.w3.org/1999/xhtml";
+		const svgNamespace = "http://www.w3.org/2000/svg";
+		const sanitizer = new Sanitizer({ removeElements: ["link", "a", "area", { name: "a", namespace: svgNamespace }] });
+		const sanitizeOptions = Object.freeze(Object.assign(Object.create(null), { sanitizer }));
+		const preventDefault = Event.prototype.preventDefault;
+		for (const type of ["paste", "drop"]) {
+			window.addEventListener(type, event => apply(preventDefault, event, []), { capture: true });
+		}
+		const probe = document.createElement("div");
+		apply(Element.prototype.setHTML, probe, ['<strong>omp</strong><link rel="preconnect" href="https://example.invalid"><a>link</a><area><svg><a></a></svg><iframe></iframe><template><iframe></iframe><link><a></a></template><div><template shadowrootmode="open"><a href="https://example.invalid">link</a><link><iframe></iframe></template></div>', sanitizeOptions]);
+		const probeRoots = [probe];
+		for (const template of probe.querySelectorAll("template")) probeRoots.push(template.content);
+		const probeShadow = probe.querySelector("div")?.shadowRoot;
+		if (probeShadow) probeRoots.push(probeShadow);
+		if (probe.querySelector("strong")?.textContent !== "omp" || probeRoots.some(root => root.querySelector("iframe,link,a,area")))
+			throw new Error("The native HTML sanitizer did not enforce the document boundary");
+		for (const attempt of [
+			() => { document.createElement("iframe").srcdoc = "<p>guard</p>"; },
+			() => {
+				const attribute = document.createAttribute("srcdoc");
+				attribute.value = "<p>guard</p>";
+				document.createElement("iframe").setAttributeNode(attribute);
+			},
+			() => { trustedTypes.createPolicy("omp-guard", { createHTML: value => value }); },
+		]) {
+			let blocked = false;
+			try { attempt(); } catch { blocked = true; }
+			if (!blocked) throw new Error("Trusted Types enforcement is unavailable");
+		}
+		// Browser-native links become inert elements; navigation is owned by the host bridge.
+		function elementName(value, namespace) {
+			const name = asString(value);
+			const localName = apply(lowerCase, apply(slice, name, [apply(lastIndexOf, name, [":"]) + 1]), []);
+			const htmlLink = namespace === htmlNamespace && (localName === "link" || localName === "a" || localName === "area");
+			return htmlLink || (namespace === svgNamespace && localName === "a") ? `omp-${localName}` : name;
+		}
+		const createElement = Document.prototype.createElement;
+		Object.defineProperty(Document.prototype, "createElement", {
+			value(name, options) { return apply(createElement, this, [elementName(name, htmlNamespace), options]); },
+			writable: false, configurable: false,
+		});
+		for (const [prototype, method, emptyName] of [[Document.prototype, "createElementNS", false], [DOMImplementation.prototype, "createDocument", true]]) {
+			const create = prototype[method];
+			Object.defineProperty(prototype, method, {
+				value(namespace, name, options) {
+					const uri = namespace === null || namespace === undefined ? null : asString(namespace);
+					// A null qualified name asks createDocument for a document with an empty root slot.
+					const qualified = emptyName && name === null ? "" : elementName(name, uri);
+					return apply(create, this, [uri, qualified, options]);
+				},
+				writable: false, configurable: false,
+			});
+		}
+		const define = CustomElementRegistry.prototype.define;
+		Object.defineProperty(CustomElementRegistry.prototype, "define", {
+			value(name, constructor, options) {
+				const extension = options?.extends;
+				const base = extension === undefined ? undefined : asString(extension);
+				const localName = base === undefined ? undefined : apply(lowerCase, base, []);
+				if (localName === "link" || localName === "a" || localName === "area") throw new TypeError("Native-link elements are inert");
+				return apply(define, this, [name, constructor, base === undefined ? undefined : { extends: base }]);
+			},
+			writable: false, configurable: false,
+		});
+		const parseHTML = Document.parseHTML;
+		Object.defineProperty(Document, "parseHTML", {
+			value(value) { return apply(parseHTML, this, [value, sanitizeOptions]); },
+			writable: false, configurable: false,
+		});
+		// Rendering inserts sanitized nodes directly, using captured native operations.
+		for (const prototype of [Element.prototype, ShadowRoot.prototype]) {
+			const descriptor = Object.getOwnPropertyDescriptor(prototype, "innerHTML");
+			const setHTML = prototype.setHTML;
+			if (!descriptor?.get || typeof setHTML !== "function") continue;
+			Object.defineProperty(prototype, "innerHTML", {
+				get: descriptor.get,
+				set(value) { apply(setHTML, this, [value === null ? "" : asString(value), sanitizeOptions]); },
+				configurable: false,
+				enumerable: descriptor.enumerable,
+			});
+			Object.defineProperty(prototype, "setHTML", {
+				value(value) { return apply(setHTML, this, [value, sanitizeOptions]); },
+				writable: false, configurable: false,
+			});
+		}
+	} catch {
+		window.stop();
+		document.open();
+		document.close();
+		window.parent.postMessage({ type: "omp:swarm:error", message: "The browser could not enforce the custom-page sandbox." }, hostOrigin);
+		return;
+	}
+	const callbacks = new Set();
+	let current;
+	// Opaque frames receive facts from their embedding host and request host-owned navigation.
+	window.addEventListener("message", event => {
+		if (!event.isTrusted || event.source !== window.parent || event.origin !== hostOrigin) return;
+		const data = event.data;
+		if (!data || typeof data !== "object" || data.type !== "omp:swarm:data") return;
+		document.documentElement.dataset.ompReducedMotion = data.reducedMotion ? "true" : "false";
+		current = data.view;
+		if (!current) return;
+		for (const callback of callbacks) {
+			try { callback(structuredClone(current)); }
+			catch (error) { window.parent.postMessage({ type: "omp:swarm:error", message: String(error).slice(0, 280) }, hostOrigin); }
+		}
+	});
+	Object.defineProperty(window, "narrator", {
+		value: Object.freeze({
+			onData(callback) {
+				if (typeof callback !== "function") throw new TypeError("onData requires a function");
+				callbacks.add(callback);
+				if (current) callback(structuredClone(current));
+				return () => callbacks.delete(callback);
+			},
+			navigate(action) {
+				window.parent.postMessage({ type: "omp:swarm:navigate", action }, hostOrigin);
+			},
+		}),
+		writable: false,
+		configurable: false,
+	});
+	window.addEventListener("error", event => {
+		window.parent.postMessage({ type: "omp:swarm:error", message: String(event.message).slice(0, 280) }, hostOrigin);
+	});
+	window.parent.postMessage({ type: "omp:swarm:ready", enforced: true }, hostOrigin);
+})();

@@ -331,7 +331,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel), role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -384,7 +384,7 @@ export class ModelControls {
 		const landed = modelsAreEqual(this.#model, targetModel);
 		if (landed) {
 			this.#host.sessionManager.appendModelChange(
-				`${targetModel.provider}/${targetModel.id}`,
+				formatModelStringWithRouting(targetModel),
 				options?.prewalk
 					? PREWALK_MODEL_CHANGE_ROLE
 					: options?.ephemeral

@@ -24,11 +24,11 @@ export interface IrcBridgeHost {
 export class IrcBridge {
 	/** Tracks parent IRC steers by object identity without trusting prompt text or publication on receipt. */
 	readonly #parentSteers = new WeakSet<AgentMessage>();
-	/** A subagent's records from anyone but its parent: answered in their own turn, never by
-	 *  extending a finished one (whose text is the subagent's result). */
+	/** A subagent's records from anyone but its parent, plus broadcast legs and board notices:
+	 *  answered in their own turn, never by extending a finished one (whose text is the subagent's result). */
 	readonly #peerMessages = new WeakSet<AgentMessage>();
-	/** Queued broadcast legs and progress notes: they ask nothing of the recipient, so they
-	 *  inject at the next step boundary like any record but never cut a `wait` short. */
+	/** Queued broadcast legs, progress notes and board notices: they ask nothing of the recipient, so
+	 *  they inject at the next step boundary like any record but never cut a `wait` short. */
 	readonly #quietRecords = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
@@ -51,12 +51,12 @@ export class IrcBridge {
 		return this.#parentSteers.has(message);
 	}
 
-	/** Whether `record` came to a subagent from anyone but its parent, or as a broadcast leg. */
+	/** Whether `record` came to a subagent from anyone but its parent, or as a broadcast leg or board notice. */
 	isPeerMessage(record: AgentMessage): boolean {
 		return this.#peerMessages.has(record);
 	}
 
-	/** Whether an incoming message can interrupt a wait: anything queued but a broadcast or progress note. */
+	/** Whether a queued message can interrupt a wait: anything but a broadcast, progress note or board notice. */
 	hasInterrupts(): boolean {
 		return this.#interrupts.some(record => !this.#quietRecords.has(record));
 	}
@@ -195,8 +195,8 @@ export class IrcBridge {
 		const fromParent = parentId === msg.from;
 		// A subagent's result answers its parent, and its run may be waiting on its
 		// own descendants, whose questions it must see in-run. Anyone else's
-		// message, or a broadcast leg (which asks no one in particular), gets a
-		// turn of its own.
+		// message, a broadcast leg (which asks no one in particular) or a board
+		// notice (answered on the board) gets a turn of its own.
 		let fromDescendant = false;
 		const seen = new Set<string>();
 		for (
@@ -210,20 +210,23 @@ export class IrcBridge {
 			}
 			seen.add(id);
 		}
-		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
+		const peerMessage =
+			parentId !== undefined &&
+			(msg.boardNotice !== undefined || msg.broadcast === true || (!fromParent && !fromDescendant));
 		// An idle subagent runs a monitored wake turn whose output is relayed
-		// back to the sender (task executor `relayWakeTurnOutput`); the main
-		// agent, mid-turn asides, relays, broadcast legs and progress notes have no such relay.
+		// back to the sender (task executor `relayWakeTurnOutput`); the main agent,
+		// mid-turn asides, relays, broadcast legs, progress notes and board notices have no such relay.
 		const relayOnStop =
 			!streaming &&
 			!planModeIdle &&
 			msg.to !== MAIN_AGENT_ID &&
+			msg.boardNotice === undefined &&
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
 			msg.progress !== true;
-		// A broadcast leg or progress note asks nothing of the recipient, so a
-		// busy one reads it at its next step boundary without being interrupted.
-		const quiet = msg.broadcast === true || msg.progress === true;
+		// A broadcast leg, progress note or board notice asks nothing of the
+		// recipient, so a busy one reads it at its next step boundary without being interrupted.
+		const quiet = msg.boardNotice !== undefined || msg.broadcast === true || msg.progress === true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -237,6 +240,7 @@ export class IrcBridge {
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
 				progress: msg.progress === true,
+				boardNotice: msg.boardNotice !== undefined,
 				interrupting: streaming && !quiet,
 				relayOnStop,
 			}),
@@ -248,10 +252,12 @@ export class IrcBridge {
 				from: msg.from,
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+				...(msg.boardNotice ? { boardNotice: msg.boardNotice } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
 				...(msg.broadcast ? { broadcast: true } : {}),
 				...(msg.progress ? { progress: true } : {}),
-				...(fromParent ? { fromParent: true } : {}),
+				// A board notice is a doorbell, never a parent request (context rollover keeps those).
+				...(fromParent && msg.boardNotice === undefined ? { fromParent: true } : {}),
 			},
 			attribution: "agent",
 			timestamp: msg.ts,

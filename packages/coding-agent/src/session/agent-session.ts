@@ -1034,6 +1034,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly agentDir: string;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
 	#costGate: CostGateApi;
@@ -2182,6 +2183,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		this.settings = config.settings;
+		this.agentDir = config.agentDir ?? config.settings.getAgentDir();
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
@@ -2694,6 +2696,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			agentDir: this.agentDir,
 			effectiveExtensionRoots: () => this.effectiveExtensionRoots,
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: () => this.#extensionRunner,
@@ -7822,6 +7825,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			shareRediscovery: rediscover => this.#tools.shareSkillRediscovery(rediscover),
 			rediscoverForUnknownName: reloadable ? () => this.#tools.rediscoverSkillsForUnknownName() : undefined,
 			settings: this.settings,
+			agentDir: this.agentDir,
 			cwd: this.sessionManager.getCwd(),
 			extensionRoots: this.effectiveExtensionRoots,
 		};

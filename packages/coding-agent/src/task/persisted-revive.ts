@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { getSwarmMemberContext } from "../swarm/context";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -238,6 +239,9 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		throwIfMissing: true,
 	});
 	const entries = reopened.getEntries();
+	const swarmMember = getSwarmMemberContext(entries);
+	const switchedSwarmModel =
+		swarmMember?.agentId === ref.id ? reopened.getSessionLocalModelChange()?.model : undefined;
 	const init = extractSessionInit(entries);
 	if (!init) {
 		await reopened.close();
@@ -264,10 +268,11 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				);
 			}
 			await spec.modelRegistry.awaitBackgroundRefresh();
-			perCallModel = resolveExactModelIdentity(init.perCallModelIdentity, spec.modelRegistry);
+			const savedIdentity = switchedSwarmModel ?? init.perCallModelIdentity;
+			perCallModel = resolveExactModelIdentity(savedIdentity, spec.modelRegistry);
 			if (!perCallModel) {
 				throw new PerCallModelError(
-					`Cannot revive subagent "${ref.id}": its per-call model ${init.perCallModelIdentity} is no longer available. A per-call worker revives only on its exact saved model.`,
+					`Cannot revive subagent "${ref.id}": its selected model ${savedIdentity} is unavailable. Select an available approved model to resume.`,
 				);
 			}
 			// File definitions follow the live parent's discovery scope; a missing parent
@@ -308,9 +313,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				return grants;
 			};
 			assertApprovedModel = model => {
-				// Parent models grant only while the real parent is live, including
-				// after this revival; transcript metadata never substitutes for it.
-				const liveParentSession = resolveParentSession();
+				// Swarm shares the live coordinator's model grant across its native member hierarchy.
+				const liveParentSession = swarmMember?.agentId === ref.id ? spec.root : resolveParentSession();
 				const parentModel = liveParentSession?.model;
 				try {
 					assertPerCallModelApproved(
@@ -405,14 +409,19 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	let session: AgentSession;
 	try {
 		({ session } = await createAgentSession({
-			cwd: spec.root.sessionManager.getCwd(),
+			cwd: swarmMember?.agentId === ref.id ? reopened.getCwd() : spec.root.sessionManager.getCwd(),
 			costGate: spec.costGate,
 			authStorage: spec.authStorage,
 			// Revived agents join the root session tree, so their observability
 			// frames ride the same bus the RPC/collab surfaces subscribed to.
 			subagentEventBus: spec.subagentEventBus,
 			modelRegistry: spec.modelRegistry,
-			...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
+			...(perCallModel
+				? {
+						model: perCallModel,
+						...(switchedSwarmModel ? {} : { thinkingLevel: init.perCallThinkingLevel ?? undefined }),
+					}
+				: {}),
 			...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 			modelPatternAuthFallback: init.perCallModel ? undefined : init.resolvedModel,
 			settings: subagentSettings,
@@ -425,8 +434,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			asyncJobManager: spec.asyncJobManager,
 			parentAgentId: ref.parentId,
 			oauthAccountPools,
-			// A per-call model is held to the operator's current grants, not the transcript's,
-			// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
+			// Every request stays within the operator's current model grants and effort ceiling.
 			...(assertApprovedModel
 				? {
 						thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
@@ -478,7 +486,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// A per-call worker runs only on its exact saved model, never a similarly named survivor.
 	if (init.perCallModel) {
 		try {
-			const saved = init.perCallModelIdentity!;
+			const saved = switchedSwarmModel ?? init.perCallModelIdentity!;
 			const identity = session.model ? formatModelStringWithRouting(session.model) : undefined;
 			if (identity !== saved) {
 				throw new PerCallModelError(
@@ -486,7 +494,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				);
 			}
 			// An explicit unset selector must not inherit a new default while reviving.
-			if (init.perCallThinkingLevel === null) session.setThinkingLevel(undefined);
+			if (!switchedSwarmModel && init.perCallThinkingLevel === null) session.setThinkingLevel(undefined);
 		} catch (error) {
 			mcpFollower?.dispose();
 			await session.dispose();

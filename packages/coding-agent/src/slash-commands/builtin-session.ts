@@ -629,6 +629,17 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "swarm",
+		icon: "agents",
+		description: "Open the live swarm board",
+		inlineHint: "[id or swarm:// URL]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			runtime.ctx.showSwarmBoard(command.args.trim() || undefined);
+			clearSubmittedText(runtime);
+		},
+	},
+	{
 		name: "branch",
 		aliases: ["rewind"],
 		icon: "branch",

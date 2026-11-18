@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
@@ -7,12 +8,16 @@ import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { motionEffectsEnabled } from "@oh-my-pi/pi-tui/motion-effects";
+import { SwarmBoardOverlay } from "@oh-my-pi/pi-tui/overlays/swarm-board";
+import type { NarratorAction } from "@oh-my-pi/pi-tui/overlays/swarm-view-model";
 import {
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
+	peekFileSync,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import {
@@ -48,7 +53,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
-import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { getAvailableThemes, getSymbolTheme, isLightTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext, ResumeSessionOptions } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
@@ -102,6 +107,11 @@ import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-disp
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { createAgentHubRuntime } from "../agent-hub-runtime";
+import { SwarmBoardSource } from "../swarm-board-runtime";
+import { getSwarmMemberContext } from "../../swarm/context";
+import { SwarmCustomPageServer } from "../../swarm/custom-page";
+import { cfgSwarmBoardMaxBytes, cfgSwarmBoardTab, cfgSwarmEnabled } from "../../swarm/settings";
+import { formatSwarmUrl, getSwarmSurface, parseSwarmUrl } from "../../swarm/surface";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { COPY_SELECTOR_OVERLAY_OPTIONS, CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
@@ -165,7 +175,14 @@ async function loadProviderAuthUi() {
 }
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
+type MenuKind =
+	| "settings"
+	| "model-picker"
+	| "model-hub"
+	| "agents-dashboard"
+	| "agent-hub"
+	| "usage-dashboard"
+	| "swarm-board";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -188,6 +205,9 @@ export class SelectorController {
 	 * focuses it instead of stacking another menu on top.
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
+	#swarmSource?: SwarmBoardSource;
+	#swarmPage?: SwarmCustomPageServer;
+	#dismissSwarmBoard?: () => void;
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -2569,6 +2589,146 @@ export class SelectorController {
 			);
 			return { component: selector, focus: selector.getSelectList() };
 		});
+	}
+
+	#navigateSwarm(source: SwarmBoardSource, action: NarratorAction): void {
+		if (!cfgSwarmEnabled.get(this.ctx.settings) || source !== this.#swarmSource)
+			throw new Error("This swarm view is closed");
+		const safe = source.resolveAction(action);
+		if (safe.type === "board_post") {
+			this.showSwarmBoard(formatSwarmUrl({ id: source.getState().id, tab: "board" }));
+			const board = this.#openMenus.get("swarm-board")?.component;
+			if (board instanceof SwarmBoardOverlay) board.showTab("board", safe.target);
+		} else if (safe.type === "open_conv") {
+			const selected = source.getState().members.find(candidate => candidate.name === safe.target);
+			if (!selected) throw new Error(`Unknown swarm member: ${safe.target}`);
+			this.#dismissSwarmBoard?.();
+			void this.ctx.focusAgentSession(selected.agentId).catch((error: unknown) => {
+				this.ctx.showError(`Could not open ${selected.name}: ${String(error)}`);
+			});
+		} else if (safe.type === "url") {
+			openPath(safe.target);
+		} else {
+			const preview = peekFileSync(safe.target, 65_537, bytes => ({
+				binary: bytes.includes(0),
+				truncated: bytes.byteLength > 65_536,
+				text: sanitizeText(new TextDecoder().decode(bytes.subarray(0, 65_536))),
+			}));
+			this.#dismissSwarmBoard?.();
+			this.ctx.showCommandReport({
+				title: path.basename(safe.target),
+				head: `${safe.target}${preview.truncated ? " · first 64 KiB" : ""}`,
+				body: new Text(preview.binary ? "Binary artifact" : preview.text, 0, 0),
+			});
+		}
+	}
+
+	showSwarmBoard(url?: string): void {
+		if (!cfgSwarmEnabled.get(this.ctx.settings)) {
+			this.ctx.showWarning("Swarm is disabled in Settings.");
+			return;
+		}
+		try {
+			const href = url ? (/^swarm:/i.test(url) ? url : `swarm://${url}`) : undefined;
+			const target = href ? parseSwarmUrl(href) : undefined;
+			const since = href && new URL(href).searchParams.has("since") ? target?.since : undefined;
+			const member = getSwarmMemberContext(this.ctx.viewSession.sessionManager.getEntries());
+			const id = target?.id ?? member?.id;
+			const artifactsDir = member ? path.dirname(member.dir) : this.ctx.sessionManager.getArtifactsDir();
+			const root = artifactsDir ?? (id ? path.dirname(getSwarmSurface(id).board.dir) : undefined);
+			if (!root) {
+				this.ctx.showWarning("The swarm board requires a saved session.");
+				return;
+			}
+			const maxBytes = cfgSwarmBoardMaxBytes.get(this.ctx.settings);
+			const currentSource = this.#swarmSource;
+			const sameSource =
+				currentSource?.options.artifactsDir === root &&
+				currentSource.options.maxBytes === maxBytes &&
+				(id
+					? currentSource.getState().id === id
+					: path.relative(path.resolve(root, "swarm"), currentSource.dir) === "");
+			const open = this.#openMenus.get("swarm-board")?.component;
+			if (sameSource && open instanceof SwarmBoardOverlay) {
+				if (target) {
+					if (since === undefined) open.showTab(target.tab);
+					else open.showSince(target.tab, since);
+				}
+				this.#focusOpenMenu("swarm-board");
+				return;
+			}
+			if (!sameSource) {
+				this.closeSwarmBoard();
+				this.#swarmSource = new SwarmBoardSource({ id, artifactsDir: root, maxBytes });
+			}
+			const source = this.#swarmSource;
+			if (!source) return;
+			source.refresh();
+			const menu = this.#claimMenu("swarm-board");
+			let closed = false;
+			const done = () => {
+				if (closed) return;
+				closed = true;
+				if (this.#dismissSwarmBoard === done) this.#dismissSwarmBoard = undefined;
+				board.dispose();
+				menu.handle?.hide();
+				this.#releaseMenu("swarm-board", menu);
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+			};
+			this.#dismissSwarmBoard = done;
+			const board = new SwarmBoardOverlay({
+				terminal: this.ctx.ui.terminal,
+				getState: () => source.getState(),
+				subscribe: listener => source.subscribe(listener),
+				requestRender: () => this.ctx.ui.requestRender(),
+				refresh: () => source.refresh(),
+				initialTab: target?.tab ?? cfgSwarmBoardTab.get(this.ctx.settings),
+				since,
+				onClose: done,
+				onNavigate: action => {
+					try {
+						this.#navigateSwarm(source, action);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCustomPage: () => {
+					try {
+						this.#swarmPage ??= new SwarmCustomPageServer({
+							source,
+							appearance: isLightTheme() ? "light" : "dark",
+							reducedMotion: !motionEffectsEnabled(),
+							onNavigate: action => this.#navigateSwarm(source, action),
+						});
+						openPath(this.#swarmPage.url);
+						this.ctx.showStatus(`Custom page: ${this.#swarmPage.url}`);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+			});
+			this.#mountMenu(menu, board, () => this.#showFullscreenMenu(board));
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	closeSwarmBoard(): void {
+		this.#dismissSwarmBoard?.();
+		this.#dismissSwarmBoard = undefined;
+		const page = this.#swarmPage;
+		this.#swarmPage = undefined;
+		if (page)
+			void page
+				.dispose()
+				.catch((error: unknown) => logger.warn("Swarm page close failed", { error: String(error) }));
+		const menu = this.#openMenus.get("swarm-board");
+		if (menu?.component instanceof SwarmBoardOverlay) menu.component.dispose();
+		menu?.handle?.hide();
+		if (menu) this.#releaseMenu("swarm-board", menu);
+		this.#swarmSource?.dispose();
+		this.#swarmSource = undefined;
 	}
 
 	showAgentHub(observers: SessionObserverRegistry, options?: AgentHubOpenOptions): void {

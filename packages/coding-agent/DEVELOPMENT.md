@@ -95,6 +95,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | `exec/`, `eval/`, `ssh/`, `dap/`, `debug/`               | Execution backends (shell, py/js kernels, ssh, debugger)     | [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [python-repl.md](../../docs/python-repl.md)                                                         |
 | `lsp/`                                                   | Language-server client/runtime                               | [lsp-config.md](../../docs/lsp-config.md), [tools/lsp.md](../../docs/tools/lsp.md)                                                                           |
 | `task/`, `irc/`, `goals/`, `plan-mode/`                  | Subagent delegation, inter-agent IRC, plan mode              | [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)                                                     |
+| `swarm/`                                                | Shared board storage, native members, wakeups and scheduling | [swarm](../../docs/tools/swarm.md), [swarm_schedule](../../docs/tools/swarm_schedule.md)                                                                     |
 | `web/`, `exa/`                                           | Fetch, browser automation, search providers, scrapers        | [tools/web_search.md](../../docs/tools/web_search.md), [tools/browser.md](../../docs/tools/browser.md)                                                       |
 | `mcp/`                                                   | MCP transport / manager / loader / tool bridge               | [mcp-config.md](../../docs/mcp-config.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md)                                                   |
 | `extensibility/`, `slash-commands/`                      | Extensions, hooks, custom tools/commands, skills, plugins    | [extensions.md](../../docs/extensions.md), [hooks.md](../../docs/hooks.md), [skills.md](../../docs/skills.md)                                                |
@@ -150,6 +151,17 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 
 - [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)
 - [collab.md](../../docs/collab.md), [agent-hub.md](../../docs/agent-hub.md), [tools/wait.md](../../docs/tools/wait.md)
+
+### Native shared boards
+
+- `src/swarm/` owns durable posts, per-member cursors, native worker sessions and owner-scoped schedules.
+- `src/internal-urls/swarm-protocol.ts` serves `swarm://` snapshots; `src/modes/swarm-board-runtime.ts` supplies event-driven live state and validated narrator documents.
+- `packages/tui/src/overlays/swarm-board.ts` renders Board, Members and Overview. `/swarm`, Alt+B and prose links open the same board; Escape restores editor focus.
+- `packages/tui/src/tools/swarm-card.ts` supplies the five tool cards. Consecutive `swarm_read` calls share the native read-group lifecycle, and expanded groups show their posts.
+- `src/swarm/custom-page.ts` serves a narrator's `view.html` on a loopback page with a sandboxed frame; `custom-page-bridge.js.txt` is the frame bootstrap and `view-store.ts` validates the documents.
+- `src/skills/` holds the four bundled swarm skills with `PROVENANCE.md`; `src/discovery/bundled-swarm.ts` registers them at priority 10.
+- `src/cli/swarm-cli.ts` implements `omp swarm list | board <id> | selftest`; `selftest` exercises the runtime headlessly and is part of the binary gate.
+- Run `bun test test/swarm test/internal-urls/swarm-protocol.test.ts` from this package for the board, runtime, scheduler and interactive integration tests.
 
 ### Web I/O and retrieval
 

@@ -14,6 +14,8 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Shared-board doorbells join the next step boundary; replies stay on that board. */
+	boardNotice?: { id: string; seq: number };
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
 	 * `relayWakeTurnOutput`). Relays are answers, never wake sources: the

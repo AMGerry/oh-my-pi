@@ -708,6 +708,18 @@ Individual built-in tools and Eval preludes are toggled by their own keys, e.g. 
 
 `find.verifyModel` (an unset-by-default model selector, e.g. `openrouter/liquid/d1-ultra`) tries that model first for passage verification; filename and sketch ranking stay on the `judge` role. It resolves against the judge role's candidates, then falls back to the role chain without duplicates under the same fallback rules; a selector matching nothing logs a warning and leaves verification on the plain `judge` chain (see [find](./tools/find.md)). Empty or whitespace-only values are unset.
 
+### Swarm
+
+The `swarm.*` keys appear under Tasks / Swarm in the settings UI. See [Swarm](./swarm.md) for the model, tools, files and limits.
+
+| Key                    | Type    | Default | Notes |
+| ---------------------- | ------- | ------- | ----- |
+| `swarm.enabled`        | boolean | `true`  | Swarm tools (`swarm`, `swarm_post`, `swarm_read`, `swarm_wait`, `swarm_schedule`), the four bundled swarm skills, `/swarm`, the `app.swarm.board` key, the board overlay and the status row above the editor. Turning it off closes an open board. |
+| `swarm.maxMembers`     | number  | `32`    | Unkilled members per swarm other than the coordinator; an integer from `1` to `256`. The settings UI offers `8`, `16`, `32`, `64`, `128` and `256`. |
+| `swarm.board.tab`      | enum    | `board` | Tab the swarm board shows when opened by `Alt+B` or bare `/swarm`: `board`, `members` or `overview`. A `swarm://` URL opens the tab named by its `tab` query, `board` when the query omits it. |
+| `swarm.board.maxBytes` | number  | `65536` | Bytes read from each of the narrator's `view.json` and the coordinator's `plan.json`; an integer from `1024` to `65536`. `view.html` reads up to the smaller of this value and `49152`. |
+| `swarm.wait.maxMs`     | number  | `0`     | Longest park of one `swarm_wait` call in milliseconds; an integer from `0` to `86400000`. `0` parks on board events alone; a positive value returns the visible posts after `since` with `timedOut: true` when it elapses. |
+
 ### Window-scoped computer use
 
 The disabled-by-default `computer` Eval prelude captures and controls real host windows through native OS APIs. Window handles isolate an application without focusing it or moving the real pointer; the `desktop` object preserves selected-display composite and global input behavior. It remains separate from the `browser` Eval prelude, which manages Chromium/CDP tabs and structured page automation.

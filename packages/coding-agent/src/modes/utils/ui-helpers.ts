@@ -710,10 +710,16 @@ export class UiHelpers {
 					const renderToolName = toolRenderName(content.name, tool);
 					resolveWaitingPoll(renderToolName);
 
-					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
+					if (readArgsCollapseIntoGroup(content.arguments, renderToolName)) {
+						const kind = renderToolName === "swarm_read" ? "swarm_read" : "read";
+						if (readGroup && readGroup.toolName !== kind) {
+							readGroup.seal();
+							readGroup = null;
+						}
 						if (hasErrorStop && errorMessage) {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
+									toolName: kind,
 									showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
@@ -728,6 +734,7 @@ export class UiHelpers {
 						} else if (afterToolSegment) {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
+									toolName: kind,
 									showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
@@ -821,7 +828,7 @@ export class UiHelpers {
 				const tool = this.ctx.viewSession.getToolByName(message.toolName);
 				const renderToolName = toolRenderName(message.toolName, tool);
 				const isReadGroupResult =
-					renderToolName === "read" &&
+					(renderToolName === "read" || renderToolName === "swarm_read") &&
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
@@ -849,8 +856,14 @@ export class UiHelpers {
 					}
 					let component = this.ctx.pendingTools.get(message.toolCallId);
 					if (!component) {
+						const kind = renderToolName === "swarm_read" ? "swarm_read" : "read";
+						if (readGroup && readGroup.toolName !== kind) {
+							readGroup.seal();
+							readGroup = null;
+						}
 						if (!readGroup) {
 							readGroup = new ReadToolGroupComponent({
+								toolName: kind,
 								showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 							});
 							readGroup.setExpanded(this.ctx.toolOutputExpanded);

@@ -60,6 +60,8 @@ import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { SwarmRuntime } from "../../swarm/runtime";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
@@ -369,6 +371,8 @@ export class EventController {
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
+	#swarmUnsubscribe?: () => void;
+
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
 		// tiny/smol role with this session's registry and credentials; the
@@ -519,6 +523,8 @@ export class EventController {
 	}
 
 	dispose(): void {
+		this.#swarmUnsubscribe?.();
+		this.#swarmUnsubscribe = undefined;
 		this.#detachToolApprovalPreviewWaiter?.();
 		this.#detachToolApprovalPreviewWaiter = undefined;
 		this.#clearApprovalPreviewGates();
@@ -676,9 +682,12 @@ export class EventController {
 		this.#approvalPreviewGates.clear();
 	}
 
-	#getReadGroup(): ReadToolGroupComponent {
+	#getReadGroup(toolName = "read"): ReadToolGroupComponent {
+		const kind = toolName === "swarm_read" ? "swarm_read" : "read";
+		if (this.#lastReadGroup && this.#lastReadGroup.toolName !== kind) this.#resetReadGroup();
 		if (!this.#lastReadGroup) {
 			const group = new ReadToolGroupComponent({
+				toolName: kind,
 				showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
@@ -904,6 +913,8 @@ export class EventController {
 	}
 
 	subscribeToAgent(): void {
+		this.#swarmUnsubscribe?.();
+		this.#swarmUnsubscribe = SwarmRuntime.local().onChange(() => this.syncSwarmActivity());
 		// Serialize non-update dispatch behind any in-flight handler run:
 		// AgentSession.#emit fires listeners fire-and-forget (it does not await
 		// listener promises), so without this a rapid stream tail
@@ -1072,7 +1083,30 @@ export class EventController {
 	}
 
 	#syncComposerActivity(): void {
-		this.ctx.composer.setRunActive(this.#runActive || this.#maintenanceActive);
+		this.ctx.composer.setRunActive(!this.#isSwarmPassive() && (this.#runActive || this.#maintenanceActive));
+	}
+
+	#isSwarmPassive(): boolean {
+		return SwarmRuntime.local().isPassive(
+			this.ctx.focusedAgentId ?? this.ctx.session.getAgentId?.() ?? MAIN_AGENT_ID,
+		);
+	}
+
+	/** Reconcile conversation activity when a board wait or scheduled turn changes. */
+	syncSwarmActivity(): void {
+		const passive = this.#isSwarmPassive();
+		if (passive && this.ctx.loadingAnimation) {
+			const loader = this.ctx.loadingAnimation;
+			loader.stop();
+			this.ctx.statusContainer.removeChild(loader);
+			this.ctx.loadingAnimation = undefined;
+		} else if (!passive && this.#runActive && this.ctx.viewSession.isStreaming) {
+			this.ctx.ensureLoadingAnimation();
+		}
+		this.#syncComposerActivity();
+		this.#setTerminalProgress(this.#runActive || this.#maintenanceActive);
+		if (this.#runActive) setRunStatus({ state: passive ? "idle" : "working" });
+		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -1171,7 +1205,7 @@ export class EventController {
 	}
 
 	#setTerminalProgress(active: boolean): void {
-		if (active) {
+		if (active && !this.#isSwarmPassive()) {
 			// Tern reads the progress as the pane's busy state (its tab's live
 			// dot), so it gets it whatever the setting says. Tern's panes carry
 			// `KITTY_WINDOW_ID`, so `TERMINAL.id` says kitty there.
@@ -1286,10 +1320,10 @@ export class EventController {
 		// The turn owns progress from here; a compaction that started it hands it over.
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
-		this.ctx.ensureLoadingAnimation();
+		if (!this.#isSwarmPassive()) this.ctx.ensureLoadingAnimation();
 		this.#runActive = true;
 		this.#syncComposerActivity();
-		setRunStatus({ state: "working" });
+		setRunStatus({ state: this.#isSwarmPassive() ? "idle" : "working" });
 		this.ctx.ui.requestRender();
 	}
 
@@ -1735,14 +1769,14 @@ export class EventController {
 				if (content.type !== "toolCall") continue;
 				const tool = this.ctx.viewSession.getToolByName(content.name);
 				const renderToolName = toolRenderName(content.name, tool);
-				if (renderToolName === "read") {
-					if (!readArgsHaveTarget(content.arguments)) {
+				if (renderToolName === "read" || renderToolName === "swarm_read") {
+					if (renderToolName === "read" && !readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
 						// read group (files + xd:// devices) vs ToolExecutionComponent (other internal URLs).
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
-					if (readArgsCollapseIntoGroup(content.arguments)) {
+					if (readArgsCollapseIntoGroup(content.arguments, renderToolName)) {
 						const existing = this.ctx.pendingTools.get(content.id);
 						if (existing) {
 							this.#trackReadToolCall(content.id, content.arguments);
@@ -1751,7 +1785,7 @@ export class EventController {
 							// A completed read remains in the timeline after leaving pendingTools.
 							this.#resolveDisplaceablePoll(renderToolName);
 							this.#trackReadToolCall(content.id, content.arguments);
-							const group = this.#getReadGroup();
+							const group = this.#getReadGroup(renderToolName);
 							group.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, group);
 							this.#toolTimelineComponents.set(content.id, group);
@@ -2102,9 +2136,9 @@ export class EventController {
 					this.ctx.chatContainer.removeChild(stale);
 				}
 			}
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+			if (readArgsCollapseIntoGroup(event.args, renderToolName)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
-				const group = this.#getReadGroup();
+				const group = this.#getReadGroup(renderToolName);
 				group.updateArgs(event.args, event.toolCallId);
 				this.ctx.pendingTools.set(event.toolCallId, group);
 				this.#toolTimelineComponents.set(event.toolCallId, group);
@@ -2154,7 +2188,7 @@ export class EventController {
 			// timeline-only hit cannot be a fresh execution — its queued
 			// update/end duplicate the settled result and are dropped as such.
 			this.#toolArgsReveal.finish(event.toolCallId);
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+			if (readArgsCollapseIntoGroup(event.args, renderToolName)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
 			}
 			const component =
@@ -2221,7 +2255,7 @@ export class EventController {
 	): void {
 		if (event.toolName === "read") this.#inlineReadToolImages(event.toolCallId, event.result);
 		this.#applyToolCompletion(component, event);
-		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
+		if (event.toolName === "read" || event.toolName === "swarm_read") this.#clearReadToolCall(event.toolCallId);
 		if (
 			component instanceof ToolExecutionComponent &&
 			component.isDisplaceableBlock() &&
@@ -2620,6 +2654,7 @@ export class EventController {
 	 */
 	#ensureWorkingLoaderWhileStreaming(): void {
 		if (!this.ctx.viewSession.isStreaming) return;
+		if (this.#isSwarmPassive()) return;
 		if (this.ctx.autoCompactionLoader || this.ctx.retryLoader) return;
 		this.ctx.ensureLoadingAnimation();
 	}

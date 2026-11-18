@@ -10,6 +10,7 @@ import {
 import { effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
+import { cfgSwarmEnabled } from "../swarm/settings";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -389,11 +390,12 @@ export const cfgTaskPerCallModel = register({
 });
 
 /**
- * Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. The operator's
- * layers ({@link Settings.grantAuthority}) must enable it; project and subagent-injected settings,
- * which the live merged value includes, can only turn it off.
+ * Swarm model selection follows `swarm.enabled`. Task and eval selection follows
+ * `task.perCallModel` in both the operator's layers ({@link Settings.grantAuthority})
+ * and the live merged settings.
  */
-export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval" | "swarm"): boolean {
+	if (invocationKind === "swarm") return cfgSwarmEnabled.get(settings);
 	return [settings.grantAuthority(), settings].every(layers => {
 		const mode = cfgTaskPerCallModel.get(layers);
 		return mode === "on" || (mode === "eval" && invocationKind === "eval");

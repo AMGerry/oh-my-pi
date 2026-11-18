@@ -5,6 +5,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../../config/settings";
+import { cfgSwarmEnabled } from "../../../swarm/settings";
+import { BUNDLED_SWARM_PROVIDER_ID, SWARM_SKILL_NAMES } from "../../../swarm/skills";
 import type { ContextFile } from "../../../capability/context-file";
 import type { ExtensionModule } from "../../../capability/extension-module";
 import type { Hook } from "../../../capability/hook";
@@ -127,6 +130,7 @@ export async function loadAllExtensions(
 	cwd?: string,
 	disabledIds?: string[],
 	extensionRoots?: EffectiveExtensionRoots,
+	settings: Settings = Settings.isolated({}),
 ): Promise<Extension[]> {
 	const extensions: Extension[] = [];
 	const effectiveDisabledIds = disabledIds ?? [];
@@ -171,6 +175,7 @@ export async function loadAllExtensions(
 
 	const loadOpts = {
 		cwd,
+		agentDir: settings.getAgentDir(),
 		includeDisabled: true,
 		disabledExtensions: effectiveDisabledIds,
 		isSourceDisabled: (source: SourceMeta) => resolveState(source, false, undefined).state === "disabled",
@@ -178,11 +183,19 @@ export async function loadAllExtensions(
 
 	// Load skills
 	try {
-		const skills = await loadCapability<Skill>("skills", loadOpts);
-		addItems(skills.all, "skill", {
-			getDescription: s => s.frontmatter?.description,
-			getTrigger: s => s.frontmatter?.globs?.join(", "),
+		const swarmEnabled = cfgSwarmEnabled.get(settings);
+		const skills = await loadCapability<Skill>("skills", {
+			...loadOpts,
+			excludeProviders: swarmEnabled ? [] : [BUNDLED_SWARM_PROVIDER_ID],
 		});
+		addItems(
+			swarmEnabled ? skills.all : skills.all.filter(skill => !SWARM_SKILL_NAMES.includes(skill.name)),
+			"skill",
+			{
+				getDescription: s => s.frontmatter?.description,
+				getTrigger: s => s.frontmatter?.globs?.join(", "),
+			},
+		);
 	} catch (error) {
 		logger.warn("Failed to load skills capability", { error: String(error) });
 	}

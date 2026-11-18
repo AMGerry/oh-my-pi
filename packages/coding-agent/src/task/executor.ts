@@ -8,6 +8,7 @@
 
 import * as fs from "node:fs/promises";
 import path from "node:path";
+import { getSwarmMemberContext, type SwarmMemberContext } from "../swarm/context";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
@@ -445,6 +446,8 @@ export function collectIrcPeerRoster(
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
+	forkFrom?: string;
+	swarmContext?: SwarmMemberContext;
 	/** Cost gate of the parent session tree; the subagent's requests count toward it. */
 	costGate?: CostGateApi;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
@@ -3341,10 +3344,12 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		// back would ping-pong two idle peers forever. A broadcast leg is not one
 		// either: it asks no one in particular, so relaying every woken peer's
 		// turn back would flood the broadcaster with "not for me" replies.
-		// A progress note promises a later answer and asks nothing back.
+		// A progress note promises a later answer and asks nothing back. A board
+		// notice is answered on the swarm board, never by copying the turn back.
 		if (
 			details &&
 			(Reflect.get(details, "wakeRelay") === true ||
+				Reflect.get(details, "boardNotice") !== undefined ||
 				Reflect.get(details, "broadcast") === true ||
 				Reflect.get(details, "progress") === true)
 		)
@@ -4504,8 +4509,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// A session-local switch since spawn (a prewalk handoff) owns the model and effort: the
 		// transcript restores the effort, and the spawn selection only backs the model up when it is
 		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent.
-		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
-		const sessionLocalModel = capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
+		const swarmMember = getSwarmMemberContext(reopened.getEntries());
+		const sessionLocalModel =
+			capture.perCallModel && swarmMember?.agentId !== id ? undefined : reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
 				const options = buildSubagentSessionOptions(
@@ -4520,14 +4526,16 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 					...(sessionLocalModel
 						? {
 								model: undefined,
-								modelPattern: [
-									sessionLocalModel,
-									...(options.model
-										? [formatModelStringWithRouting(options.model)]
-										: options.modelPattern === undefined
-											? []
-											: [options.modelPattern].flat()),
-								],
+								modelPattern: capture.perCallModel
+									? sessionLocalModel
+									: [
+											sessionLocalModel,
+											...(options.model
+												? [formatModelStringWithRouting(options.model)]
+												: options.modelPattern === undefined
+													? []
+													: [options.modelPattern].flat()),
+										],
 								modelPatternFallbackRole: undefined,
 								modelPatternDefaultFallbackChain: undefined,
 								thinkingLevel: undefined,
@@ -5015,13 +5023,23 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						parentSession: options.sessionFile ?? undefined,
-						suppressBreadcrumb: true,
-					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+			const sessionManagerPromise = options.forkFrom
+				? sessionFile
+					? SessionManager.forkFrom(options.forkFrom, effectiveCwd, path.dirname(sessionFile), undefined, {
+							sessionFile,
+							copyArtifacts: false,
+							suppressBreadcrumb: true,
+							resetInheritedCost: true,
+							repairInterruptedTail: true,
+						})
+					: Promise.reject(new Error("A conversation fork requires a persistent destination session"))
+				: sessionFile
+					? SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							parentSession: options.sessionFile ?? undefined,
+							suppressBreadcrumb: true,
+						})
+					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
@@ -5297,6 +5315,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			}
+			if (options.swarmContext && session.model) {
+				sessionManager.appendCustomEntry("swarm.member", options.swarmContext);
+				sessionManager.appendModelChange(formatModelStringWithRouting(session.model), "temporary");
+				sessionManager.appendThinkingLevelChange(session.thinkingLevel, session.configuredThinkingLevel());
 			}
 			// Bill the auto-prewalk judgment to the child session it decided for, only now:
 			// an earlier entry would make the SDK treat this fresh session as resumed and

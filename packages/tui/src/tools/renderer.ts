@@ -147,6 +147,8 @@ export interface NativeToolView {
 	readonly preview?: TspPreview | { readonly tail: number } | "none" | "children";
 	/** Starts expanded whatever the transcript's expand state (the todo checklist); the user can still fold it. */
 	readonly open?: boolean;
+	/** A running call is parked on an event; its native head shows a static pending state. */
+	readonly passive?: boolean;
 	/** Render frameless (`frame:"inline"`): a head line plus a disclosed body. */
 	readonly inline?: boolean;
 	/** Head actions offered on hover (`copy`, `retry`). */

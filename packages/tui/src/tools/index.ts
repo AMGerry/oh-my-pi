@@ -22,6 +22,11 @@ import { readToolRenderer } from "./read";
 import type { ToolRenderer } from "./renderer";
 import { resolveRenderer } from "./resolve";
 import { taskToolRenderer } from "./task";
+import { swarmToolRenderer } from "./swarm";
+import { swarmPostToolRenderer } from "./swarm-post";
+import { swarmReadToolRenderer } from "./swarm-read";
+import { swarmWaitToolRenderer } from "./swarm-wait";
+import { swarmScheduleToolRenderer } from "./swarm-schedule";
 import { thinkToolRenderer } from "./think";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
@@ -57,6 +62,11 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	recall: recallToolRenderer,
 	reflect: reflectToolRenderer,
 	task: taskToolRenderer,
+	swarm: swarmToolRenderer,
+	swarm_post: swarmPostToolRenderer,
+	swarm_read: swarmReadToolRenderer,
+	swarm_wait: swarmWaitToolRenderer,
+	swarm_schedule: swarmScheduleToolRenderer,
 	think: thinkToolRenderer,
 	todo: todoToolRenderer,
 	github: githubToolRenderer,

@@ -24,6 +24,8 @@ import {
 	type SkillWarning,
 	setActiveSkills,
 } from "../extensibility/skills";
+import { cfgSwarmEnabled } from "../swarm/settings";
+import { SWARM_SKILL_NAMES } from "../swarm/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
@@ -102,6 +104,7 @@ export interface SessionToolsHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	agentDir?: string;
 	/** Session-local extension roots (explicit + mode + configured) for post-startup reloads. */
 	effectiveExtensionRoots(): EffectiveExtensionRoots;
 	modelRegistry: ModelRegistry;
@@ -555,6 +558,8 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	/** Authored fixed entries retained across feature switches and stale-path replacement. */
+	#fixedSkills: Skill[] | undefined;
 	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
 	#skillsRediscovery: Promise<readonly Skill[]> | undefined;
 	/** Earliest time (ms since epoch) a name no loaded skill owns may start another rediscovery. */
@@ -613,11 +618,15 @@ export class SessionTools {
 			restoredReply && restoredPromptDigest
 				? { reply: restoredReply, promptDigest: restoredPromptDigest }
 				: undefined;
-		this.#skills = options.skills ?? [];
+		const skills = options.skills ?? [];
+		this.#skills = cfgSwarmEnabled.get(host.settings)
+			? skills
+			: skills.filter(skill => !SWARM_SKILL_NAMES.includes(skill.name));
 		this.#promptSkills = this.#skills;
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		this.#fixedSkills = this.#skillsReloadable ? undefined : [...skills];
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
 		// so an early reconcile (think after the startup model resolution)
@@ -709,7 +718,13 @@ export class SessionTools {
 
 	/** Stores a re-pointed fixed skill list (see `rediscoverSkills`) and refreshes prompt metadata. */
 	async replaceSkills(skills: readonly Skill[]): Promise<void> {
-		this.#skills = [...skills];
+		const swarmEnabled = cfgSwarmEnabled.get(this.#host.settings);
+		if (this.#fixedSkills) {
+			const retained = swarmEnabled ? [] : this.#fixedSkills.filter(skill => SWARM_SKILL_NAMES.includes(skill.name));
+			const replacementNames = new Set(skills.map(skill => skill.name));
+			this.#fixedSkills = [...skills, ...retained.filter(skill => !replacementNames.has(skill.name))];
+		}
+		this.#skills = swarmEnabled ? [...skills] : skills.filter(skill => !SWARM_SKILL_NAMES.includes(skill.name));
 		this.#promptSkills = this.#skills;
 		if (this.#host.agentKind() === "main") {
 			setActiveSkills(this.#skills);
@@ -775,6 +790,8 @@ export class SessionTools {
 		const discovered = await loadSkills({
 			...skillsSettings,
 			cwd: this.#host.sessionManager.getCwd(),
+			settings: this.#host.settings,
+			agentDir: this.#host.agentDir,
 			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
 			extensionRoots: this.#host.effectiveExtensionRoots(),
 		});
@@ -2418,11 +2435,16 @@ export class SessionTools {
 
 	async #rediscoverSkills(): Promise<void> {
 		resetCapabilities();
-		if (!this.#skillsReloadable) return;
-		const { discovered, skillsSettings } = await this.#discoverSkills();
-		this.#skills = discovered.skills;
-		this.#skillWarnings = discovered.warnings;
-		this.#skillsSettings = skillsSettings;
+		if (this.#fixedSkills) {
+			this.#skills = cfgSwarmEnabled.get(this.#host.settings)
+				? [...this.#fixedSkills]
+				: this.#fixedSkills.filter(skill => !SWARM_SKILL_NAMES.includes(skill.name));
+		} else {
+			const { discovered, skillsSettings } = await this.#discoverSkills();
+			this.#skills = discovered.skills;
+			this.#skillWarnings = discovered.warnings;
+			this.#skillsSettings = skillsSettings;
+		}
 		if (this.#host.agentKind() === "main") {
 			setActiveSkills(this.#skills);
 		}

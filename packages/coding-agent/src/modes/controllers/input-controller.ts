@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { cfgSwarmEnabled } from "../../swarm/settings";
 import {
 	type AutocompleteProvider,
 	BRACKETED_PASTE_END,
@@ -795,6 +796,11 @@ export class InputController {
 		]);
 		for (const key of hubKeys) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+		}
+		if (cfgSwarmEnabled.get(this.ctx.settings)) {
+			for (const key of this.ctx.keybindings.getKeys("app.swarm.board")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showSwarmBoard());
+			}
 		}
 
 		// Double-tap left arrow on an empty editor: opens the agent hub from the

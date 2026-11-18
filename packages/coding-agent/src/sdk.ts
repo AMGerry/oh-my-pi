@@ -3,6 +3,8 @@ import { type CallRecord, ChangeJournal, callDetails } from "./commit/selective/
 import { createCommitPrelude } from "./commit/selective/prelude-definition";
 import { cfgDisasmBackend } from "./disasm/active";
 import { createDsmPrelude, releaseDsmReferences } from "./disasm/prelude-definition";
+import { cfgSwarmEnabled } from "./swarm/settings";
+import { SWARM_SKILL_NAMES } from "./swarm/skills";
 import {
 	Agent,
 	type AgentEvent,
@@ -1385,12 +1387,13 @@ export async function resolvePrewalkTarget(
  */
 export async function discoverSkills(
 	cwd?: string,
-	_agentDir?: string,
-	settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions">,
+	agentDir?: string,
+	settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions" | "settings">,
 ): Promise<{ skills: Skill[]; warnings: SkillWarning[] }> {
 	return await loadSkillsInternal({
 		...settings,
 		cwd: cwd ?? getProjectDir(),
+		agentDir,
 	});
 }
 
@@ -2014,16 +2017,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	}
 	const cwd = options.cwd ?? getProjectDir();
-	const agentDir = options.agentDir ?? getAgentDir();
+	const providedSettings = await (options.settings ?? options.settingsManager);
+	const agentDir = options.agentDir ?? providedSettings?.getAgentDir() ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
 	const subagentEventBus = options.subagentEventBus ?? new EventBus();
 
 	registerSshCleanup();
 	registerEvalCleanup();
 
-	const settings = await (options.settings ??
-		options.settingsManager ??
-		logger.time("settings", Settings.init, { cwd, agentDir }));
+	const settings = providedSettings ?? (await logger.time("settings", Settings.init, { cwd, agentDir }));
 	// Discovery provider toggles and process-wide setting effects (theme, request limits, …)
 	// follow the newest holder: each top-level session holds both on its settings until disposed,
 	// then hands them back to the previous holder. Subagents and helper sessions never take them,
@@ -2188,6 +2190,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
 					...skillsSettings,
 					disabledExtensions: disabledExtensionIds,
+					settings,
 				})
 			: undefined;
 	discoveredSkillsPromise?.catch(() => {});
@@ -2460,7 +2463,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let skills: Skill[];
 	let skillWarnings: SkillWarning[];
 	if (options.skills !== undefined) {
-		skills = options.skills;
+		skills = cfgSwarmEnabled.get(settings)
+			? options.skills
+			: options.skills.filter(skill => !SWARM_SKILL_NAMES.includes(skill.name));
 		skillWarnings = [];
 	} else {
 		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
@@ -2652,6 +2657,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		const toolSession: ToolSession = {
+			agentDir,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -5418,6 +5424,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			agentDir,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,
@@ -5437,7 +5444,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEvalPreludes,
 			evalToolSession: toolSession,
 			customCommands: customCommandsResult.commands,
-			skills,
+			skills: options.skills ?? skills,
 			skillDescriptions,
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
@@ -5597,7 +5604,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					session.emitNotice("error", `Failed to apply tool settings: ${error}`);
 				}
 			};
-			cfgSessionToolGates.listen(session, () => reconcileGatedTools());
+			cfgSessionToolGates.listen(session, async (next, previous) => {
+				try {
+					if (next.builtins.swarm !== previous.builtins.swarm) await session.refreshSkills();
+				} finally {
+					await reconcileGatedTools();
+				}
+			});
 			// `find.enabled: auto` follows the judge role; a role change only touches
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));

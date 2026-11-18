@@ -30,6 +30,9 @@ import { linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { DEFAULT_SPINNER_INTERVAL_MS, spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
+import { extensionLinkScheme, extensionLinksVersion } from "../render/extension-links";
+import { splitSwarmProseLinks } from "../render/swarm-links";
+import { plainText } from "../native/spans";
 import { WidthAwareText } from "../render";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
@@ -447,6 +450,7 @@ export class AssistantMessageComponent extends Container {
 	#markdownTheme: MarkdownTheme | undefined;
 	/** Text-block sources with {@link #linkTargets} applied, for the native `md` nodes; reset with the targets. */
 	#nativeLinkSources = new Map<string, string>();
+	#swarmLinks = new Map<string, string>();
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
@@ -963,6 +967,8 @@ export class AssistantMessageComponent extends Container {
 			media,
 			web,
 			getThemeEpoch(),
+			extensionLinksVersion(),
+			hasTranscriptActions(),
 		];
 		return this.#native.get(key, () => this.#describeMessage(tail, rate, { media, web }));
 	}
@@ -996,6 +1002,7 @@ export class AssistantMessageComponent extends Container {
 		{ media, web }: { media: boolean; web: boolean },
 	): NativeNode {
 		const message = this.#displayedMessage;
+		this.#swarmLinks.clear();
 		const previousParts = this.#nativeParts;
 		const parts = new Map<string, { text: string; stream: boolean; node: NativeNode }>();
 		// `slot` identifies the node across rebuilds; `key` is its sibling key inside its parent.
@@ -1053,12 +1060,50 @@ export class AssistantMessageComponent extends Container {
 						this.#nativeLinkSources.set(text, resolved);
 						return resolved;
 					};
+					const prose = (slot: string, key: string, source: string, stream: boolean): NativeNode => {
+						if (stream || !hasTranscriptActions() || extensionLinkScheme("swarm://") !== "swarm")
+							return markdown(slot, key, linked(source, stream), stream);
+						const segments = splitSwarmProseLinks(source);
+						if (segments.length === 1 && segments[0]?.kind === "markdown")
+							return markdown(slot, key, linked(source, stream), stream);
+						const nodes = segments.map((segment, part) => {
+							const partKey = `${key}.board.${part}`;
+							const partSlot = `${slot}.board.${part}`;
+							if (segment.kind === "markdown")
+								return markdown(partSlot, partKey, linked(segment.text, false), false);
+							const act = `swarm-board:${segment.href}`;
+							this.#swarmLinks.set(act, segment.href);
+							const value = `${segment.href}\0${segment.text}`;
+							const cached = previousParts.get(partSlot);
+							const entry =
+								cached?.text === value
+									? cached
+									: {
+											text: value,
+											stream: false,
+											node: node(
+												"text",
+												{
+													spans: [span(plainText(segment.text), "link")],
+													actions: { click: act },
+													title: plainText(segment.href),
+													wrap: "word",
+												},
+												undefined,
+												partKey,
+											),
+										};
+							parts.set(partSlot, entry);
+							return entry.node;
+						});
+						return node("col", { gap: "xs" }, nodes, key);
+					};
 					const runs: EmbedSegment[] =
 						embedHost() && hasEmbed(source)
 							? nativeEmbedRuns(source, streaming)
 							: [{ kind: "markdown", text: source }];
-					let parts = 0;
-					const nextSlot = (): string => (parts++ === 0 ? `t${index}` : `t${index}.${parts - 1}`);
+					let slotCount = 0;
+					const nextSlot = (): string => (slotCount++ === 0 ? `t${index}` : `t${index}.${slotCount - 1}`);
 					runs.forEach((run, at) => {
 						if (run.kind === "embed") {
 							children.push(...this.#describePage(run.embed, nextSlot(), web));
@@ -1068,7 +1113,7 @@ export class AssistantMessageComponent extends Container {
 						const tail = streaming && at === runs.length - 1;
 						if (!this.#showImages || !this.#showTableCharts || !hasChartTable(text)) {
 							const slot = nextSlot();
-							children.push(markdown(slot, slot, linked(text, tail), tail));
+							children.push(prose(slot, slot, text, tail));
 							return;
 						}
 						// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
@@ -1077,7 +1122,7 @@ export class AssistantMessageComponent extends Container {
 							const slot = nextSlot();
 							if (segment.kind === "markdown") {
 								const live = tail && part === segments.length - 1;
-								children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+								children.push(prose(slot, slot, segment.text.trim(), live));
 								return;
 							}
 							const chart = lookupTableChart(segment.table);
@@ -1302,6 +1347,11 @@ export class AssistantMessageComponent extends Container {
 
 	/** Control clicks (the error frame's actions, the turn footer's Copy): omp's own retry, clipboard and model-picker paths. */
 	#handleAction(act: string): void {
+		const board = this.#swarmLinks.get(act);
+		if (board) {
+			runTranscriptAction({ act: "swarm-board", url: board });
+			return;
+		}
 		if (act === "retry") runTranscriptAction({ act: "retry" });
 		else if (act === "switch-model") runTranscriptAction({ act: "switch-model" });
 		else if (act === "copy-error" && this.#errorText) runTranscriptAction({ act: "copy", text: this.#errorText });
