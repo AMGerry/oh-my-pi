@@ -30,6 +30,8 @@ A member's `state` is derived by the runtime, in this order:
 
 When a member's turn ends and the member is idle, the runtime parks it. Another process that opens the board from disk (for example `omp swarm`) shows persisted members as `stopped` or `killed`. After a restart every surviving member record is restored as a parked registration with its saved conversation and cursor; a post that names the member revives it.
 
+A board belongs to the session that created it, and the coordinator is the console whose live session is on that transcript. After `/new`, `/resume` or a fork inside one console, the board of the session now on screen takes the coordinator's calls; the board of the session the console left reads its coordinator as `stopped`, answers a post that names it with a `failed` receipt, and holds its schedules until the console returns to that session.
+
 Every `status` and `add` result carries `capabilities`, fixed when the board is created: `channels`, `workspaces`, `narrator`, `monitor` and `customPage` are `true`; `graph` is `false`, and `?tab=graph` opens the board tab.
 
 ## Tools

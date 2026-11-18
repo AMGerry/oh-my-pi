@@ -64,6 +64,14 @@ interface PendingSwarmWait extends SwarmWaitSnapshot {
 }
 
 /** Main-thread owner of each session's board writer and live event subscriptions. */
+/**
+ * The transcript a registry ref speaks for. A live session reports its current file, which follows `/new`,
+ * `/resume` and a fork inside one process; the registered file stands in while no session is attached.
+ */
+function conversationFile(ref: AgentRef | undefined): string | null | undefined {
+	return ref?.session?.sessionFile ?? ref?.sessionFile;
+}
+
 export class SwarmRuntime implements SwarmApi {
 	static #global: SwarmRuntime | undefined;
 	static #installed: SwarmApi | undefined;
@@ -154,8 +162,9 @@ export class SwarmRuntime implements SwarmApi {
 				if (member.agentId !== ref.id) continue;
 				this.#observeSession(board, member.name, member, ref);
 				if (member.killed) continue;
-				if (member.sessionFile && ref.sessionFile && member.sessionFile !== ref.sessionFile) continue;
-				const sessionFile = ref.sessionFile ?? member.sessionFile;
+				const current = conversationFile(ref);
+				if (member.sessionFile && current && member.sessionFile !== current) continue;
+				const sessionFile = current ?? member.sessionFile;
 				const active = ref.session?.model;
 				const model = active
 					? `${formatModelStringWithRouting(active)}${ref.session?.thinkingLevel ? `:${ref.session.thinkingLevel}` : ""}`
@@ -170,7 +179,8 @@ export class SwarmRuntime implements SwarmApi {
 	#observeSession(board: BoardStore, name: string, member: SwarmMember, ref: AgentRef): void {
 		if (member.role === "coordinator") return;
 		const key = `${board.metadata.id}:${member.agentId}`;
-		const sameFile = !member.sessionFile || !ref.sessionFile || member.sessionFile === ref.sessionFile;
+		const current = conversationFile(ref);
+		const sameFile = !member.sessionFile || !current || member.sessionFile === current;
 		const session = member.killed || !sameFile ? null : ref.session;
 		const previous = this.#sessionObservers.get(key);
 		if (previous?.session === session) return;
@@ -206,7 +216,8 @@ export class SwarmRuntime implements SwarmApi {
 			if (member.role === "coordinator") continue;
 			const existing = this.registry.get(member.agentId);
 			if (existing) {
-				if (existing.sessionFile && member.sessionFile && existing.sessionFile !== member.sessionFile)
+				const current = conversationFile(existing);
+				if (current && member.sessionFile && current !== member.sessionFile)
 					throw new SwarmRefusal(`Agent ${member.agentId} belongs to a different conversation`);
 				continue;
 			}
@@ -234,8 +245,8 @@ export class SwarmRuntime implements SwarmApi {
 		if (member.agentId !== actor.agentId) throw new SwarmRefusal("The session's swarm identity has changed");
 		if (member.killed || this.#closing.has(member.agentId))
 			throw new SwarmRefusal(`Member ${actor.name} is killed or closing`);
-		const ref = this.registry.get(member.agentId);
-		if (ref?.sessionFile && member.sessionFile && ref.sessionFile !== member.sessionFile)
+		const current = conversationFile(this.registry.get(member.agentId));
+		if (current && member.sessionFile && current !== member.sessionFile)
 			throw new SwarmRefusal("This member's conversation is not active in the native registry");
 		return board;
 	}
@@ -303,7 +314,8 @@ export class SwarmRuntime implements SwarmApi {
 		if (member.killed) return "killed";
 		if (this.#waiters.has(`${id}:${member.agentId}`) || this.#quota.has(member.agentId)) return "waiting";
 		const ref = this.registry.get(member.agentId);
-		if (ref?.sessionFile && member.sessionFile && ref.sessionFile !== member.sessionFile) return "stopped";
+		const current = conversationFile(ref);
+		if (current && member.sessionFile && current !== member.sessionFile) return "stopped";
 		// A root session is registered as running for its whole life; its live run tells work from idle.
 		if (ref?.kind === "main") return ref.session?.isStreaming ? "working" : "stopped";
 		return ref?.status === "running" ? "working" : "stopped";
@@ -547,12 +559,13 @@ export class SwarmRuntime implements SwarmApi {
 		this.#activeLaunches.delete(`${id}:${member.agentId}`);
 		if (member.killed || this.#closing.has(member.agentId)) return;
 		const ref = this.registry.get(member.agentId);
-		if (ref?.sessionFile && member.sessionFile && ref.sessionFile !== member.sessionFile) return;
+		const file = conversationFile(ref);
+		if (file && member.sessionFile && file !== member.sessionFile) return;
 		const error = outcome.error && /RESOURCE_EXHAUSTED|\b429\b|quota/i.test(outcome.error) ? "quota" : outcome.error;
 		if (error === "quota") this.#quota.add(member.agentId);
 		else this.#quota.delete(member.agentId);
 		board.updateMember(name, {
-			sessionFile: ref?.sessionFile ?? member.sessionFile,
+			sessionFile: file ?? member.sessionFile,
 			...(outcome.model ? { model: outcome.model } : {}),
 			error,
 		});
@@ -817,7 +830,7 @@ export class SwarmRuntime implements SwarmApi {
 					let error: string | undefined;
 					if (member.killed || this.#closing.has(member.agentId))
 						error = `Member ${member.name} is killed or closing`;
-					else if (ref?.sessionFile && member.sessionFile && ref.sessionFile !== member.sessionFile)
+					else if (member.sessionFile && (conversationFile(ref) ?? member.sessionFile) !== member.sessionFile)
 						error = `Member ${member.name}'s conversation is not active in the native registry`;
 					if (error) return { name: member.name, to: member.agentId, outcome: "failed", error };
 					try {
@@ -877,7 +890,12 @@ export class SwarmRuntime implements SwarmApi {
 			.find(candidate => candidate.name === actor.name && candidate.agentId === actor.agentId);
 		const ref = this.registry.get(actor.agentId);
 		if (!member || member.killed || member.error === "quota" || !ref || ref.status === "aborted") return false;
-		if (member.sessionFile && ref.sessionFile && member.sessionFile !== ref.sessionFile) return false;
+		const current = conversationFile(ref);
+		if (member.sessionFile && current && member.sessionFile !== current) return false;
+		// A board whose console moved to another transcript keeps its schedules quiet until the console returns.
+		const coordinator = board?.listMembers().find(candidate => candidate.role === "coordinator");
+		const consoleFile = coordinator && conversationFile(this.registry.get(coordinator.agentId));
+		if (coordinator?.sessionFile && consoleFile && coordinator.sessionFile !== consoleFile) return false;
 		return this.#memberState(member, actor.id) !== "working";
 	}
 

@@ -11,6 +11,7 @@ import { SWARM_WAIT_DISCONNECTED, type SwarmActor } from "../../src/swarm/api";
 import { BoardStore } from "../../src/swarm/board-store";
 import { SwarmRuntime } from "../../src/swarm/runtime";
 import { makeChannel, makeMember, SWARM_CAPABILITIES } from "./fixtures";
+import { TestSchedulerClock } from "./scheduler-clock";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -246,6 +247,98 @@ describe("swarm runtime waiting and delivery", () => {
 		const retried = await f.runtime.wait(f.actor("alice"), { since: 0 });
 		expect(retried.messages[0]?.text).toBe("@alice retained assignment");
 		expect(retried.lastReadSeq).toBe(1);
+	});
+});
+
+describe("a console that switched sessions", () => {
+	// A root session registers with the transcript it started on; `/new` and `/resume` move its live session to another.
+	function switched(live: string) {
+		const f = fixture();
+		f.board.updateMember("coordinator", { sessionFile: "board-session.jsonl" });
+		const run = { isStreaming: false, sessionFile: live };
+		f.registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: run as unknown as AgentSessionHandle,
+			sessionFile: "startup-session.jsonl",
+			status: "running",
+		});
+		return { ...f, run };
+	}
+
+	it("binds the coordinator to the transcript its live session reports", async () => {
+		const f = switched("board-session.jsonl");
+		const id = f.board.metadata.id;
+		const posted = await f.runtime.post(f.coordinator, "@alice start");
+		expect(posted.post).toMatchObject({ seq: 1, agent: "coordinator" });
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
+		f.run.isStreaming = true;
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "working" });
+		const report = await f.runtime.post(f.actor("alice"), "@coordinator [done] first");
+		const bell = report.receipts.find(receipt => receipt.name === "coordinator");
+		expect(bell?.error ?? "").not.toContain("not active in the native registry");
+	});
+
+	it("keeps a board's schedules quiet while the console is on another transcript", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-swarm-console-"));
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const clock = new TestSchedulerClock();
+		const runtime = new SwarmRuntime(registry, lifecycle, new IrcBus(registry, lifecycle), clock);
+		cleanups.push(async () => {
+			runtime.dispose();
+			await lifecycle.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
+		});
+		const board = runtime.create(dir, {
+			id: "swarm-console",
+			title: "Console",
+			coordinator: makeMember("Main", { role: "coordinator", wakeMode: null, sessionFile: "board-session.jsonl" }),
+			capabilities: SWARM_CAPABILITIES,
+		});
+		board.addMember("monitor", makeMember("Member-monitor", { role: "monitor", wakeMode: null }));
+		registry.register({
+			id: "Member-monitor",
+			displayName: "monitor",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "idle",
+		});
+		const run = { isStreaming: false, sessionFile: "other-session.jsonl" };
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: run as unknown as AgentSessionHandle,
+			sessionFile: "startup-session.jsonl",
+			status: "running",
+		});
+		const revived = vi.spyOn(lifecycle, "ensureLive").mockRejectedValue(new Error("the test ends the turn here"));
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+		const monitor: SwarmActor = { id: board.metadata.id, name: "monitor", agentId: "Member-monitor" };
+		await runtime.schedule(monitor, { action: "create", cron: "* * * * *", prompt: "tick", daemon: true });
+		await clock.advanceBy(60_000);
+		expect(revived).toHaveBeenCalledTimes(0);
+		run.sessionFile = "board-session.jsonl";
+		await clock.advanceBy(60_000);
+		expect(revived).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a board of another transcript closed to the console", async () => {
+		const f = switched("other-session.jsonl");
+		const id = f.board.metadata.id;
+		await expect(f.runtime.post(f.coordinator, "@alice start")).rejects.toThrow(
+			"This member's conversation is not active in the native registry",
+		);
+		f.run.isStreaming = true;
+		expect(f.runtime.snapshot(id).members[0]).toMatchObject({ name: "coordinator", state: "stopped" });
+		const report = await f.runtime.post(f.actor("alice"), "@coordinator [done] first");
+		expect(report.receipts.find(receipt => receipt.name === "coordinator")).toMatchObject({
+			outcome: "failed",
+			error: "Member coordinator's conversation is not active in the native registry",
+		});
 	});
 });
 
